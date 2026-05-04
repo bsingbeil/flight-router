@@ -50,6 +50,13 @@ class Itinerary:
 
     @property
     def num_stops(self) -> int:
+        """Number of intermediate stops counting ALL legs.
+
+        Note: a train+fly itinerary is counted as 1 stop per leg, so
+        `train → fly → fly` returns num_stops=2 even though there's only
+        one flight transit. Callers filtering by num_stops should account
+        for this if they care about flight-only stop counts.
+        """
         return max(0, len(self.legs) - 1)
 
     @property
@@ -130,6 +137,10 @@ TRANSIT_REGIONS: dict[frozenset[str], set[str]] = {
     frozenset({"EUROPE", "NORTH_AMERICA"}):        {"EUROPE", "NORTH_AMERICA"},
 }
 
+# Destinations classified as longhaul. When the destination is in this set,
+# train+fly itineraries are also generated with a 1-stop flight extension.
+LONGHAUL_REGIONS: set[str] = {"EUROPE", "NORTH_AMERICA"}
+
 
 def _valid_transit_regions(origin_region: str, destination_region: str) -> set[str]:
     """Look up the set of valid transit regions for an origin/destination pair."""
@@ -163,8 +174,10 @@ def generate_candidates(
     Stages:
       1. Always include the direct flight as candidate #1.
       2. If max_stops >= 1, generate 1-stop options through valid transit hubs.
-      3. If max_stops >= 2, generate 2-stop options (different-region pairs).
-      4. If origin == "CKG" and include_train, generate train+fly options.
+      3. If origin == "CKG" and include_train, generate train+fly options
+         (with a longhaul train+1-stop extension when max_stops >= 1 and
+         the destination is in EUROPE / NORTH_AMERICA).
+      4. (Task 7 will insert pure 2-stop generation here.)
     """
     # Validate endpoints exist in NODES (raises KeyError on miss).
     origin: Node = NODES[origin_code]
@@ -220,7 +233,6 @@ def generate_candidates(
 
             # Longhaul extension: train + 1-stop flight for EUROPE / NORTH_AMERICA destinations
             # Only when max_stops >= 1 (train leg doesn't count as a flight stop).
-            LONGHAUL_REGIONS = {"EUROPE", "NORTH_AMERICA"}
             if max_stops >= 1 and destination.region in LONGHAUL_REGIONS:
                 # Reuse the same transit-region rules used for pure-flight 1-stops,
                 # but anchored on the airport we're flying out of after the train.
