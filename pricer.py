@@ -136,6 +136,14 @@ def _real_fli_search(origin: str, destination: str, date: str) -> Optional[dict]
     if isinstance(best, tuple):
         best = best[0]
 
+    # Defensive: fli's price parser is known to return 0.0 for intra-China
+    # and some China-exit legs where the CNY price encoding doesn't match
+    # its decoder. Treat zero prices as "no valid result" so the leg gets
+    # marked unpriceable and the itinerary gets excluded from rankings.
+    # Better to show fewer options correctly than many options wrongly.
+    if not best.price or float(best.price) <= 0.0:
+        return None
+
     # Airline lives on the first leg, not the top-level result.
     airline_name = "Unknown"
     if best.legs:
