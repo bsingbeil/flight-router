@@ -71,3 +71,39 @@ class Itinerary:
             else:
                 parts.append(arrow + leg.destination)
         return "".join(parts)
+
+
+# ---------- Imports for generation (kept at module level — no I/O) ----------
+from nodes import NODES, Node
+
+
+# ---------- Candidate generation ----------
+
+def generate_candidates(
+    origin_code: str,
+    destination_code: str,
+    max_stops: int = 1,
+    include_train: bool = True,
+) -> list[Itinerary]:
+    """Generate every plausible Itinerary for (origin, destination).
+
+    Pure function: same inputs → same outputs. No network, no I/O.
+
+    Stages:
+      1. Always include the direct flight as candidate #1.
+      2. If max_stops >= 1, generate 1-stop options through valid transit hubs.
+      3. If max_stops >= 2, generate 2-stop options (different-region pairs).
+      4. If origin == "CKG" and include_train, generate train+fly options.
+    """
+    # Validate endpoints exist in NODES (raises KeyError on miss).
+    origin: Node = NODES[origin_code]
+    destination: Node = NODES[destination_code]
+
+    candidates: list[Itinerary] = []
+
+    # Stage 1: direct flight
+    candidates.append(Itinerary(legs=[
+        Leg(mode=FLIGHT, origin=origin_code, destination=destination_code),
+    ]))
+
+    return candidates
