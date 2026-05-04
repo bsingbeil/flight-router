@@ -14,6 +14,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from nodes import NODES, Node
+
 
 # ---------- Mode constants ----------
 
@@ -73,8 +75,68 @@ class Itinerary:
         return "".join(parts)
 
 
-# ---------- Imports for generation (kept at module level — no I/O) ----------
-from nodes import NODES, Node
+# ---------- Geographic transit rules ----------
+#
+# TRANSIT_REGIONS[frozenset({region_a, region_b})] returns the set of regions
+# that are valid transit zones for that origin/destination pair. Without this
+# filter, every search would return nonsense like CKG → LHR via BKK.
+#
+# For same-region routes, frozenset({"CHINA"}) lookup uses the single-element key.
+TRANSIT_REGIONS: dict[frozenset[str], set[str]] = {
+    # Within-region (domestic + intra-area)
+    frozenset({"CHINA"}):           {"CHINA"},
+    frozenset({"GREATER_CHINA"}):   {"CHINA", "GREATER_CHINA"},
+    frozenset({"SOUTHEAST_ASIA"}):  {"SOUTHEAST_ASIA"},
+    frozenset({"EAST_ASIA"}):       {"EAST_ASIA"},
+    frozenset({"EUROPE"}):          {"EUROPE"},
+    frozenset({"MIDDLE_EAST"}):     {"MIDDLE_EAST"},
+    frozenset({"NORTH_AMERICA"}):   {"NORTH_AMERICA"},
+
+    # Cross-region pairs (lookup is order-independent via frozenset)
+    frozenset({"CHINA", "GREATER_CHINA"}):    {"CHINA", "GREATER_CHINA"},
+    frozenset({"CHINA", "EAST_ASIA"}):        {"CHINA", "GREATER_CHINA", "EAST_ASIA"},
+    frozenset({"CHINA", "SOUTHEAST_ASIA"}):   {"CHINA", "GREATER_CHINA", "SOUTHEAST_ASIA"},
+    frozenset({"CHINA", "MIDDLE_EAST"}):      {"CHINA", "GREATER_CHINA", "MIDDLE_EAST"},
+    frozenset({"CHINA", "EUROPE"}):           {"CHINA", "GREATER_CHINA", "EAST_ASIA", "MIDDLE_EAST", "EUROPE"},
+    frozenset({"CHINA", "NORTH_AMERICA"}):    {"CHINA", "GREATER_CHINA", "EAST_ASIA", "NORTH_AMERICA"},
+
+    frozenset({"GREATER_CHINA", "EAST_ASIA"}):       {"CHINA", "GREATER_CHINA", "EAST_ASIA"},
+    frozenset({"GREATER_CHINA", "SOUTHEAST_ASIA"}):  {"GREATER_CHINA", "SOUTHEAST_ASIA"},
+    frozenset({"GREATER_CHINA", "MIDDLE_EAST"}):     {"GREATER_CHINA", "MIDDLE_EAST"},
+    frozenset({"GREATER_CHINA", "EUROPE"}):          {"GREATER_CHINA", "EAST_ASIA", "MIDDLE_EAST", "EUROPE"},
+    frozenset({"GREATER_CHINA", "NORTH_AMERICA"}):   {"GREATER_CHINA", "EAST_ASIA", "NORTH_AMERICA"},
+
+    frozenset({"SOUTHEAST_ASIA", "EAST_ASIA"}):    {"SOUTHEAST_ASIA", "GREATER_CHINA", "EAST_ASIA"},
+    frozenset({"SOUTHEAST_ASIA", "MIDDLE_EAST"}):  {"SOUTHEAST_ASIA", "MIDDLE_EAST"},
+    frozenset({"SOUTHEAST_ASIA", "EUROPE"}):       {"SOUTHEAST_ASIA", "MIDDLE_EAST", "EUROPE"},
+    frozenset({"SOUTHEAST_ASIA", "NORTH_AMERICA"}): {"SOUTHEAST_ASIA", "EAST_ASIA", "NORTH_AMERICA"},
+
+    frozenset({"EAST_ASIA", "MIDDLE_EAST"}):       {"EAST_ASIA", "MIDDLE_EAST"},
+    frozenset({"EAST_ASIA", "EUROPE"}):            {"EAST_ASIA", "MIDDLE_EAST", "EUROPE"},
+    frozenset({"EAST_ASIA", "NORTH_AMERICA"}):     {"EAST_ASIA", "NORTH_AMERICA"},
+
+    frozenset({"MIDDLE_EAST", "EUROPE"}):          {"MIDDLE_EAST", "EUROPE"},
+    frozenset({"MIDDLE_EAST", "NORTH_AMERICA"}):   {"MIDDLE_EAST", "EUROPE", "NORTH_AMERICA"},
+
+    frozenset({"EUROPE", "NORTH_AMERICA"}):        {"EUROPE", "NORTH_AMERICA"},
+}
+
+
+def _valid_transit_regions(origin_region: str, destination_region: str) -> set[str]:
+    """Look up the set of valid transit regions for an origin/destination pair."""
+    key = frozenset({origin_region, destination_region})
+    return TRANSIT_REGIONS.get(key, {origin_region, destination_region})
+
+
+def _airport_hubs_in_regions(regions: set[str], exclude: set[str]) -> list[Node]:
+    """All airport-type hub nodes in any of the given regions, excluding `exclude` codes."""
+    return [
+        n for n in NODES.values()
+        if n.region in regions
+        and n.is_hub
+        and n.node_type == "airport"
+        and n.code not in exclude
+    ]
 
 
 # ---------- Candidate generation ----------
@@ -101,9 +163,19 @@ def generate_candidates(
 
     candidates: list[Itinerary] = []
 
-    # Stage 1: direct flight
+    # Stage 1: direct flight (always)
     candidates.append(Itinerary(legs=[
         Leg(mode=FLIGHT, origin=origin_code, destination=destination_code),
     ]))
+
+    # Stage 2: 1-stop via valid transit hubs
+    if max_stops >= 1:
+        regions = _valid_transit_regions(origin.region, destination.region)
+        hubs = _airport_hubs_in_regions(regions, exclude={origin_code, destination_code})
+        for hub in hubs:
+            candidates.append(Itinerary(legs=[
+                Leg(mode=FLIGHT, origin=origin_code, destination=hub.code),
+                Leg(mode=FLIGHT, origin=hub.code, destination=destination_code),
+            ]))
 
     return candidates

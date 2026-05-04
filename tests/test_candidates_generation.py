@@ -33,3 +33,48 @@ def test_unknown_origin_raises():
 def test_unknown_destination_raises():
     with pytest.raises(KeyError):
         generate_candidates("CKG", "ZZZ", max_stops=0, include_train=False)
+
+
+def test_one_stop_generation_includes_direct_plus_via_hubs():
+    cands = generate_candidates("CKG", "VIE", max_stops=1, include_train=False)
+    # Direct + several 1-stop options through CHINA / GREATER_CHINA / EAST_ASIA / MIDDLE_EAST hubs
+    assert len(cands) >= 4
+    direct = cands[0]
+    assert direct.num_stops == 0
+    one_stops = [c for c in cands if c.num_stops == 1]
+    assert len(one_stops) >= 3
+
+
+def test_one_stop_via_hub_has_correct_hub_code():
+    cands = generate_candidates("CKG", "VIE", max_stops=1, include_train=False)
+    via_doh = next((c for c in cands if c.hub_codes == ["DOH"]), None)
+    assert via_doh is not None
+    assert via_doh.legs[0].origin == "CKG" and via_doh.legs[0].destination == "DOH"
+    assert via_doh.legs[1].origin == "DOH" and via_doh.legs[1].destination == "VIE"
+
+
+def test_one_stop_excludes_origin_and_destination_as_hubs():
+    cands = generate_candidates("CKG", "VIE", max_stops=1, include_train=False)
+    one_stops = [c for c in cands if c.num_stops == 1]
+    for c in one_stops:
+        assert c.hub_codes[0] != "CKG"
+        assert c.hub_codes[0] != "VIE"
+
+
+def test_one_stop_excludes_rail_nodes_as_transit_hubs():
+    """Rail-only nodes (CKG-N, HKG-WK) must never appear as flight transit hubs."""
+    cands = generate_candidates("CKG", "VIE", max_stops=1, include_train=False)
+    one_stops = [c for c in cands if c.num_stops == 1]
+    for c in one_stops:
+        assert c.hub_codes[0] not in {"CKG-N", "HKG-WK"}
+
+
+def test_southeast_asia_to_china_does_not_route_through_europe():
+    """A CHINA ↔ SEA pair should not include EU or NA hubs as transit."""
+    cands = generate_candidates("CKG", "BKK", max_stops=1, include_train=False)
+    one_stops = [c for c in cands if c.num_stops == 1]
+    eu_codes = {"LHR", "CDG", "FRA", "AMS", "MUC", "VIE"}
+    na_codes = {"YVR", "YYZ", "YEG", "SEA", "SFO", "LAX", "ORD"}
+    for c in one_stops:
+        assert c.hub_codes[0] not in eu_codes
+        assert c.hub_codes[0] not in na_codes
