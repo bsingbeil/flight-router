@@ -107,11 +107,26 @@ def _is_fresh(disk_data: dict) -> bool:
 # ---------- Network fetch ----------
 
 def _fetch_rates_from_api() -> Optional[dict]:
-    """One HTTP call to Frankfurter, returns USD-anchored rates dict."""
+    """One HTTP call to Frankfurter, returns USD-anchored rates dict.
+
+    Two compatibility shims required as of 2026:
+    - Python 3.14 on macOS doesn't trust the system CA bundle by default.
+      We point ssl at certifi's bundle so HTTPS verification works.
+    - Frankfurter rejects the default 'Python-urllib/3.14' user-agent with
+      HTTP 403. A custom UA gets through.
+    """
+    import ssl
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        ctx = ssl.create_default_context()
+
     to_param = ",".join(TRACKED_CURRENCIES)
     url = f"https://api.frankfurter.app/latest?from=USD&to={to_param}"
+    req = urllib.request.Request(url, headers={"User-Agent": "flight-router/1.0"})
     try:
-        with urllib.request.urlopen(url, timeout=8) as resp:
+        with urllib.request.urlopen(req, timeout=8, context=ctx) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         api_rates = data.get("rates", {})
     except Exception:
