@@ -10,9 +10,11 @@ The point is to automate the manual work of comparing multi-hop options that Goo
 
 ## Status
 
-**v1 working.** Five-module pipeline is in place and runs end-to-end against a mock pricer. Live `fli` integration is sketched but not yet verified — the `_real_fli_search()` function in `pricer.py` is a best-guess against fli's API and needs to be tested against current docs before flipping `USE_MOCK = False`.
+**v1 complete with caveats.** Five-module pipeline runs end-to-end against the live `fli` (Google Flights) library. CLI available as `python cli.py CKG VIE 2026-09-15`. Test suite is 45 tests covering candidate generation, connections data, types, currency conversion, end-to-end mock pricing, and CLI argument parsing.
 
-Display currency is CAD with live FX from Frankfurter, cached to disk for 24hr.
+**Caveat — fli library has a price-parsing bug** for many intra-China and China-exit legs (SGN→CKG, HAN→CKG, HKG→CKG when on CNY-priced carriers). Fli returns `price=0.0` for these, which we now defensively treat as "no valid result" so the leg is marked unpriceable and the itinerary is excluded from rankings. This is the right safety choice — better to surface fewer options correctly than many options wrongly — but it means routings through certain Vietnamese and Chinese hubs disappear from results entirely. The user's primary use case (CKG → EUROPE via Middle East / East Asia hubs) is unaffected.
+
+**Caveat — fli returns prices in arbitrary currencies** depending on Google Flights' geolocation guess (commonly JPY for Asian queries, sometimes USD or CNY). The pricer normalises via `currency.convert_to_display(amount, from_ccy)`, anchored on USD via Frankfurter rates with disk caching.
 
 ## Modules
 
@@ -28,9 +30,10 @@ Read `ARCHITECTURE.md` for the full layered explanation. Read `README.md` for us
 
 ## Immediate next steps
 
-1. Verify and wire up live fli (test `_real_fli_search()` signature against current fli library, flip `USE_MOCK = False`).
-2. Build `cli.py` so this is runnable as `python -m flight_router CKG VIE 2026-09-15`.
-3. Add date-range search using `fli.search_dates` — see ARCHITECTURE.md §5.1 for the design.
+1. Patch fli's price parser upstream (or fork) so the intra-China zero-price bug doesn't drop options. The price block lives in a protobuf field that fli's `_parse_price_info` doesn't currently decode for CNY-denominated results.
+2. Add date-range search using `fli.search_dates` — see ARCHITECTURE.md §5.1 for the design. Major win for flexible travel.
+3. Consider Kiwi.com integration (ARCHITECTURE.md §5.3) for self-transfer routings — would also work around the fli zero-price issue by providing a second price source.
+4. Rate-limiting: rapid-fire queries against fli return HTTP 429s. The pricer concurrency is set to 6 workers, which seems to be near the threshold. Add backoff/retry if results consistently show "no complete pricings."
 
 ## Conventions
 
@@ -42,7 +45,9 @@ Read `ARCHITECTURE.md` for the full layered explanation. Read `README.md` for us
 
 ## Watch out for
 
-- **fli API drift.** It's a reverse-engineered Google Flights wrapper. Imports and types in `_real_fli_search()` may need updating against the current fli release.
+- **fli zero-price gotcha.** fli's `_parse_price_info` returns `price=0.0` for many intra-China and China-exit legs (SGN→CKG, HAN→CKG, HKG→CKG when CNY-priced). `pricer._real_fli_search` defensively returns `None` when fli reports zero, so these legs surface as "no flights found" rather than as silent C$0 contributions. If you see itineraries unexpectedly missing from results, that's why.
+- **fli rate limiting.** Repeated rapid queries against fli return HTTP 429. With `MAX_CONCURRENT_QUERIES = 6` in pricer.py and ~20-30 candidates per search, you can hit limits during heavy testing. Wait a few minutes between probe runs.
+- **fli currency drift.** fli returns prices in whatever currency Google Flights serves (often JPY due to IP geolocation). The pricer uses `currency.convert_to_display(price, native_ccy)` to normalise. If a price looks ~150x off, the source currency wasn't recognised — check `currency.TRACKED_CURRENCIES`.
 - **2-stop candidate explosion.** `max_stops=2` produces ~600 candidates for CHINA→EUROPE pairs. Default to `max_stops=1` and only escalate when needed.
 - **Train data is hardcoded.** Always verify on Trip.com or 12306 before booking a train leg the system suggests.
 
