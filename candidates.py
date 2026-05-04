@@ -172,12 +172,12 @@ def generate_candidates(
     Pure function: same inputs → same outputs. No network, no I/O.
 
     Stages:
-      1. Always include the direct flight as candidate #1.
-      2. If max_stops >= 1, generate 1-stop options through valid transit hubs.
-      3. If max_stops >= 2, generate 2-stop options (different-region pairs).
-      4. If origin == "CKG" and include_train, generate train+fly options
-         (with a longhaul train+1-stop extension when max_stops >= 1 and
-         the destination is in EUROPE / NORTH_AMERICA).
+      1.  Always include the direct flight as candidate #1.
+      2.  If max_stops >= 1, generate 1-stop options through valid transit hubs.
+      2b. If max_stops >= 2, generate 2-stop options (different-region pairs).
+      3.  If origin == "CKG" and include_train, generate train+fly options
+          (with a longhaul train+1-stop extension when max_stops >= 1 and
+          the destination is in EUROPE / NORTH_AMERICA).
     """
     # Validate endpoints exist in NODES (raises KeyError on miss).
     origin: Node = NODES[origin_code]
@@ -190,10 +190,12 @@ def generate_candidates(
         Leg(mode=FLIGHT, origin=origin_code, destination=destination_code),
     ]))
 
+    # Shared input for stages 2 and 2b
+    regions = _valid_transit_regions(origin.region, destination.region)
+    hubs = _airport_hubs_in_regions(regions, exclude={origin_code, destination_code})
+
     # Stage 2: 1-stop via valid transit hubs
     if max_stops >= 1:
-        regions = _valid_transit_regions(origin.region, destination.region)
-        hubs = _airport_hubs_in_regions(regions, exclude={origin_code, destination_code})
         for hub in hubs:
             candidates.append(Itinerary(legs=[
                 Leg(mode=FLIGHT, origin=origin_code, destination=hub.code),
@@ -202,14 +204,14 @@ def generate_candidates(
 
     # Stage 2b: 2-stop via different-region hub pairs (avoids backtracking)
     if max_stops >= 2:
-        regions = _valid_transit_regions(origin.region, destination.region)
-        hubs = _airport_hubs_in_regions(regions, exclude={origin_code, destination_code})
         for hub_a in hubs:
             for hub_b in hubs:
                 if hub_a.code == hub_b.code:
                     continue
                 if hub_a.region == hub_b.region:
-                    continue   # no same-region backtracking
+                    # Skip same-region pairs: they produce nonsense routings
+                    # like CKG → CTU (CHINA) → CAN (CHINA) → VIE.
+                    continue
                 candidates.append(Itinerary(legs=[
                     Leg(mode=FLIGHT, origin=origin_code, destination=hub_a.code),
                     Leg(mode=FLIGHT, origin=hub_a.code, destination=hub_b.code),

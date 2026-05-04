@@ -184,3 +184,10 @@ def test_two_stop_excludes_origin_and_destination_as_hubs():
     for c in two_stops:
         assert "CKG" not in c.hub_codes
         assert "VIE" not in c.hub_codes
+
+
+def test_two_stop_same_region_route_produces_no_two_stop_candidates():
+    """Intra-China route: all valid hubs are same region, so no valid 2-stop pairs exist."""
+    cands = generate_candidates("CKG", "CTU", max_stops=2, include_train=False)
+    two_stops = [c for c in cands if c.num_stops == 2]
+    assert len(two_stops) == 0
