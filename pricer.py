@@ -11,14 +11,15 @@ Concurrency: flight pricing is I/O-bound, so we use a thread pool to
 parallelize fli calls. A simple in-memory cache prevents duplicate API
 calls when the same leg appears in multiple candidate routings.
 
-NOTE: by default this runs against a *mock* pricer that fabricates
-plausible prices. Set USE_MOCK = False once you've installed fli and
-verified the API call signature in `_real_fli_search()` below.
+NOTE: default is LIVE pricing via the fli library. Flip USE_MOCK = True
+below to run against the synthetic mock pricer (useful for offline
+development, unit tests, or working around fli rate limits / parser bugs).
 """
 
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -28,7 +29,7 @@ import currency
 
 # ---------- Configuration ----------
 
-USE_MOCK = False         # set to False once fli is installed and verified
+USE_MOCK = False         # default: live fli pricing. Flip to True for offline dev/test.
 MAX_CONCURRENT_QUERIES = 6   # don't hammer Google Flights
 
 # Transfer time penalty between flight legs (minutes).
@@ -148,6 +149,10 @@ def _real_fli_search(origin: str, destination: str, date: str) -> Optional[dict]
         first_airline = best.legs[0].airline
         airline_name = getattr(first_airline, "value", str(first_airline)) or "Unknown"
 
+    if best.currency is None:
+        print(f"[pricer] WARN: fli returned no currency for {origin}->{destination}; "
+              f"assuming USD. Price={best.price}. If totals look ~7-150x off, this is the cause.")
+
     return {
         "price": float(best.price),
         "currency": best.currency or "USD",
@@ -203,22 +208,34 @@ _fli_search: Callable[[str, str, str], Optional[dict]] = (
 
 # ---------- Pricer ----------
 
-def _price_flight_leg(leg: Leg, date: str, cache: dict) -> PricedLeg:
-    """Price a single flight leg, using cache to avoid duplicate API calls."""
-    cache_key = (leg.origin, leg.destination, date)
-    if cache_key in cache:
-        return PricedLeg(leg=leg, **cache[cache_key])
+def _price_flight_leg(leg: Leg, date: str, cache: dict, cache_lock: threading.Lock) -> PricedLeg:
+    """Price a single flight leg, using cache to avoid duplicate API calls.
 
+    The cache_lock serializes dict reads/writes across worker threads. The
+    fli call itself runs OUTSIDE the lock so concurrency is preserved for
+    distinct keys. A small race window remains where two threads can make
+    duplicate calls for the same key (both miss the cache before either
+    writes), but neither result will corrupt the cache.
+    """
+    cache_key = (leg.origin, leg.destination, date)
+
+    with cache_lock:
+        if cache_key in cache:
+            return PricedLeg(leg=leg, **cache[cache_key])
+
+    # Cache miss — call fli outside the lock
     try:
         result = _fli_search(leg.origin, leg.destination, date)
     except Exception as e:
         priced = PricedLeg(leg=leg, error=f"fli call failed: {e}")
-        cache[cache_key] = {"error": priced.error}
+        with cache_lock:
+            cache[cache_key] = {"error": priced.error}
         return priced
 
     if result is None:
         priced = PricedLeg(leg=leg, error="No flights found")
-        cache[cache_key] = {"error": priced.error}
+        with cache_lock:
+            cache[cache_key] = {"error": priced.error}
         return priced
 
     cost = currency.convert_to_display(result["price"], result["currency"])
@@ -227,7 +244,8 @@ def _price_flight_leg(leg: Leg, date: str, cache: dict) -> PricedLeg:
         "duration_min": result["duration_min"],
         "airline": result.get("airline"),
     }
-    cache[cache_key] = payload
+    with cache_lock:
+        cache[cache_key] = payload
     return PricedLeg(leg=leg, **payload)
 
 
@@ -245,14 +263,14 @@ def _price_train_leg(leg: Leg) -> PricedLeg:
     )
 
 
-def price_itinerary(itin: Itinerary, date: str, cache: dict) -> PricedItinerary:
+def price_itinerary(itin: Itinerary, date: str, cache: dict, cache_lock: threading.Lock) -> PricedItinerary:
     """Price every leg of one itinerary."""
     priced_legs = []
     for leg in itin.legs:
         if leg.mode == TRAIN:
             priced_legs.append(_price_train_leg(leg))
         else:
-            priced_legs.append(_price_flight_leg(leg, date, cache))
+            priced_legs.append(_price_flight_leg(leg, date, cache, cache_lock))
     return PricedItinerary(itinerary=itin, priced_legs=priced_legs)
 
 
@@ -269,11 +287,12 @@ def price_candidates(
     currency.get_rates()
 
     cache: dict = {}
+    cache_lock = threading.Lock()
     priced: list[PricedItinerary] = []
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
-            pool.submit(price_itinerary, c, date, cache): c
+            pool.submit(price_itinerary, c, date, cache, cache_lock): c
             for c in candidates
         }
         for future in as_completed(futures):
