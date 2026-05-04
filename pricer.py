@@ -101,11 +101,11 @@ class PricedItinerary:
 def _real_fli_search(origin: str, destination: str, date: str) -> Optional[dict]:
     """Real call to fli library. Returns None if no flights found.
 
-    *** VERIFY THIS AGAINST CURRENT FLI DOCS BEFORE TRUSTING ***
-    https://github.com/punitarani/fli
+    Returns:
+        {"price": float, "currency": str, "duration_min": int, "airline": str}
 
-    Expected return dict:
-        {"price_usd": float, "duration_min": int, "airline": str}
+    `currency` is whatever Google Flights returns (often the IP-geolocated
+    currency, e.g. JPY, USD, CNY). Pricer downstream converts to display.
     """
     # Imports kept inside the function so the module loads even without fli installed.
     from fli.search import SearchFlights
@@ -124,18 +124,29 @@ def _real_fli_search(origin: str, destination: str, date: str) -> Optional[dict]
             )
         ],
         seat_type=SeatType.ECONOMY,
-        stops=MaxStops.NONE,             # only direct flights per leg
+        stops=MaxStops.NON_STOP,        # FIX: was MaxStops.NONE which doesn't exist
         sort_by=SortBy.CHEAPEST,
     )
     results = SearchFlights().search(filters)
     if not results:
         return None
 
+    # Result may be a FlightResult or a tuple of FlightResults — normalize.
     best = results[0]
+    if isinstance(best, tuple):
+        best = best[0]
+
+    # Airline lives on the first leg, not the top-level result.
+    airline_name = "Unknown"
+    if best.legs:
+        first_airline = best.legs[0].airline
+        airline_name = getattr(first_airline, "value", str(first_airline)) or "Unknown"
+
     return {
-        "price_usd": float(best.price),
+        "price": float(best.price),
+        "currency": best.currency or "USD",
         "duration_min": int(best.duration),
-        "airline": getattr(best, "airline", None) or "Unknown",
+        "airline": airline_name,
     }
 
 
@@ -171,7 +182,8 @@ def _mock_fli_search(origin: str, destination: str, date: str) -> Optional[dict]
     # 800 km/h cruise + 30min taxi/turn time.
     duration_min = int(distance / 800 * 60 + 30)
     return {
-        "price_usd": round(price_usd, 2),
+        "price": round(price_usd, 2),
+        "currency": "USD",
         "duration_min": duration_min,
         "airline": f"MOCK-{(h % 7) + 1}",
     }
@@ -203,7 +215,7 @@ def _price_flight_leg(leg: Leg, date: str, cache: dict) -> PricedLeg:
         cache[cache_key] = {"error": priced.error}
         return priced
 
-    cost = currency.usd_to_display(result["price_usd"])
+    cost = currency.convert_to_display(result["price"], result["currency"])
     payload = {
         "cost": cost,
         "duration_min": result["duration_min"],

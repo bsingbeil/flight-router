@@ -38,7 +38,7 @@ CACHE_TTL_HOURS = 24
 CACHE_FILE = Path(__file__).parent / ".fx_cache.json"
 
 # Currencies we care about. Frankfurter accepts these as a comma list.
-TRACKED_CURRENCIES = ["CAD", "CNY", "EUR", "GBP"]
+TRACKED_CURRENCIES = ["CAD", "CNY", "EUR", "GBP", "JPY", "AUD", "HKD", "SGD", "THB", "KRW"]
 
 # Last-resort rates for the very first run on a fresh machine with no network.
 # Once the disk cache exists, these are never consulted again.
@@ -47,6 +47,12 @@ BOOTSTRAP_RATES = {
     "USD_TO_CNY": 7.20,
     "USD_TO_EUR": 0.93,
     "USD_TO_GBP": 0.79,
+    "USD_TO_JPY": 152.0,
+    "USD_TO_AUD": 1.52,
+    "USD_TO_HKD": 7.80,
+    "USD_TO_SGD": 1.35,
+    "USD_TO_THB": 35.5,
+    "USD_TO_KRW": 1370.0,
 }
 
 CURRENCY_SYMBOLS = {
@@ -235,6 +241,36 @@ def cny_to_display(amount_cny: float) -> float:
         return amount_cny / rates["USD_TO_CNY"]
     # General path: CNY -> USD -> target
     usd = amount_cny / rates["USD_TO_CNY"]
+    return usd * rates[f"USD_TO_{DISPLAY_CURRENCY}"]
+
+
+def convert_to_display(amount: float, from_currency: str) -> float:
+    """Convert amount from any tracked currency to the display currency.
+
+    Path: from_ccy → USD → display_ccy. The 'USD_TO_<ccy>' rates in get_rates()
+    are USD-anchored, so we divide to go ccy→USD and multiply to go USD→ccy.
+    Falls back to passing the amount through if the currency is unrecognised.
+    """
+    if from_currency == DISPLAY_CURRENCY:
+        return amount
+    rates = get_rates()
+
+    # Step 1: convert from_currency → USD
+    if from_currency == "USD":
+        usd = amount
+    else:
+        rate_key = f"USD_TO_{from_currency}"
+        if rate_key not in rates:
+            # Unknown currency — assume USD as best guess (safer than crashing).
+            print(f"[currency] WARN: unknown source currency {from_currency!r}, "
+                  f"treating as USD")
+            usd = amount
+        else:
+            usd = amount / rates[rate_key]
+
+    # Step 2: convert USD → display
+    if DISPLAY_CURRENCY == "USD":
+        return usd
     return usd * rates[f"USD_TO_{DISPLAY_CURRENCY}"]
 
 
