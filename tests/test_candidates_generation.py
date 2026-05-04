@@ -152,3 +152,35 @@ def test_train_plus_one_stop_not_generated_for_short_haul():
         if c.has_train_leg and len(c.legs) == 3
     ]
     assert len(train_three_leg) == 0
+
+
+def test_max_stops_zero_returns_only_direct_and_train():
+    """No 1-stop candidates when max_stops=0."""
+    cands = generate_candidates("CKG", "VIE", max_stops=0, include_train=False)
+    assert len(cands) == 1
+    assert cands[0].num_stops == 0
+
+
+def test_max_stops_two_generates_two_stop_options():
+    cands = generate_candidates("CKG", "VIE", max_stops=2, include_train=False)
+    two_stops = [c for c in cands if c.num_stops == 2]
+    assert len(two_stops) >= 1
+
+
+def test_two_stop_does_not_repeat_a_region():
+    """Both intermediate hubs must be in different regions."""
+    from nodes import NODES
+    cands = generate_candidates("CKG", "VIE", max_stops=2, include_train=False)
+    two_stops = [c for c in cands if c.num_stops == 2]
+    for c in two_stops:
+        hub_a = NODES[c.hub_codes[0]]
+        hub_b = NODES[c.hub_codes[1]]
+        assert hub_a.region != hub_b.region
+
+
+def test_two_stop_excludes_origin_and_destination_as_hubs():
+    cands = generate_candidates("CKG", "VIE", max_stops=2, include_train=False)
+    two_stops = [c for c in cands if c.num_stops == 2]
+    for c in two_stops:
+        assert "CKG" not in c.hub_codes
+        assert "VIE" not in c.hub_codes

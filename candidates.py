@@ -174,10 +174,10 @@ def generate_candidates(
     Stages:
       1. Always include the direct flight as candidate #1.
       2. If max_stops >= 1, generate 1-stop options through valid transit hubs.
-      3. If origin == "CKG" and include_train, generate train+fly options
+      3. If max_stops >= 2, generate 2-stop options (different-region pairs).
+      4. If origin == "CKG" and include_train, generate train+fly options
          (with a longhaul train+1-stop extension when max_stops >= 1 and
          the destination is in EUROPE / NORTH_AMERICA).
-      4. (Task 7 will insert pure 2-stop generation here.)
     """
     # Validate endpoints exist in NODES (raises KeyError on miss).
     origin: Node = NODES[origin_code]
@@ -199,6 +199,22 @@ def generate_candidates(
                 Leg(mode=FLIGHT, origin=origin_code, destination=hub.code),
                 Leg(mode=FLIGHT, origin=hub.code, destination=destination_code),
             ]))
+
+    # Stage 2b: 2-stop via different-region hub pairs (avoids backtracking)
+    if max_stops >= 2:
+        regions = _valid_transit_regions(origin.region, destination.region)
+        hubs = _airport_hubs_in_regions(regions, exclude={origin_code, destination_code})
+        for hub_a in hubs:
+            for hub_b in hubs:
+                if hub_a.code == hub_b.code:
+                    continue
+                if hub_a.region == hub_b.region:
+                    continue   # no same-region backtracking
+                candidates.append(Itinerary(legs=[
+                    Leg(mode=FLIGHT, origin=origin_code, destination=hub_a.code),
+                    Leg(mode=FLIGHT, origin=hub_a.code, destination=hub_b.code),
+                    Leg(mode=FLIGHT, origin=hub_b.code, destination=destination_code),
+                ]))
 
     # Stage 3: train + fly (CKG-only currently)
     if include_train and origin_code == "CKG":
