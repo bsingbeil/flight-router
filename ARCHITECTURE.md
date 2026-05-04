@@ -396,7 +396,7 @@ The `fli` library has a `search_dates` function specifically for this — it ret
 Add to `pricer.py`:
 ```python
 def _real_fli_search_range(origin, dest, date_from, date_to) -> list[dict]:
-    """Returns [{"date": "2026-09-13", "price_usd": 540, ...}, ...]"""
+    """Returns [{"date": "2026-09-13", "price": 540, "currency": "USD", ...}, ...]"""
 ```
 
 The pricing pipeline gains a new mode:
@@ -419,16 +419,18 @@ class DatedItinerary:
 - `pricer.py` — new `price_candidates_in_range()` function alongside `price_candidates()`.
 - No changes to `nodes.py`, `connections.py`, `candidates.py`, `currency.py`.
 
-### 5.2 CLI (planned)
+### 5.2 CLI (shipped — `cli.py`)
 
-A `cli.py` that accepts arguments and runs the full pipeline:
+A `cli.py` argparse entry point. Runs as:
+
 ```bash
-python -m flight_router CKG VIE 2026-09-15
-python -m flight_router CKG VIE 2026-09-15 --max-stops 2 --train
-python -m flight_router CKG VIE --depart 2026-09-12:18 --return 2026-09-22:28
+python cli.py CKG VIE 2026-09-15
+python cli.py CKG VIE 2026-09-15 --max-stops 2 --top 5
+python cli.py CKG VIE 2026-09-15 --sort duration
+python cli.py DAD CKG 2026-09-15 --no-train
 ```
 
-Should call `currency.start_background_refresh()` immediately on startup so the FX fetch overlaps with argument parsing.
+Calls `currency.start_background_refresh()` immediately on startup so the FX fetch overlaps with argument parsing and candidate generation. Exits 0 on success.
 
 ### 5.3 Kiwi.com / self-transfer pricer (planned)
 
@@ -468,15 +470,19 @@ Implementation: ordering of regions per route corridor. Add to `TRANSIT_REGIONS`
 
 ---
 
-## 6. Testing strategy (TBD)
+## 6. Testing strategy
 
-Currently testing is by running the demo blocks in `__main__`. As the system grows, formal tests should target:
+The test suite has 45 tests across four files:
 
-- **`candidates.py`** — pure function, easy to unit-test. Snapshot test: "given CKG → VIE max_stops=1, expect this exact list of 18 candidates."
-- **`currency.py`** — mock the HTTP call, test cache freshness logic and fallback tiers.
-- **`pricer.py`** — use `USE_MOCK = True` for integration tests. Verify: leg cache deduplication, transfer time math, savings/hr calculation correctness.
+- `tests/test_connections.py` (7 tests) — `TrainConnection` dataclass contract, `TRAIN_CONNECTIONS` shape, every endpoint exists in `NODES`, helper behaviors
+- `tests/test_candidates_types.py` (11 tests) — `Leg` and `Itinerary` types, including computed properties (`origin`, `destination`, `num_stops`, `hub_codes`, `has_train_leg`) and `describe()` rendering of rail-to-airport transfers
+- `tests/test_candidates_generation.py` (22 tests) — direct, 1-stop, 2-stop, train+fly, and longhaul train+1-stop generation; transit-region filtering; same-region 2-stop exclusion; rail-node exclusion as flight hubs
+- `tests/test_e2e_mock.py` (2 tests) — full pipeline against the mock pricer using a `_force_mock_pricer` fixture, verifying `generate_candidates → price_candidates → rank_by_cost → format_results` end-to-end
+- `tests/test_cli.py` (3 tests) — argparse parser defaults, parser overrides, end-to-end CLI invocation with monkeypatched mock
 
-Out of scope for v1; revisit when the system has 2+ users or the cost of breakage rises.
+Run with `pytest -v` from the project root.
+
+The pure-function discipline in `candidates.py` is what makes the candidates tests reliable — same input always produces same output, no network, no clock dependency.
 
 ---
 

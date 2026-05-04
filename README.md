@@ -39,7 +39,8 @@ flight-router/
 ├── connections.py   HSR connections from Chongqing
 ├── candidates.py    routing engine — generates candidate itineraries
 ├── pricer.py        calls fli for each leg, ranks results
-└── currency.py      live FX rates with 24hr disk cache
+├── currency.py      live FX rates with 24hr disk cache
+└── cli.py           terminal entry point (python cli.py CKG VIE 2026-09-15)
 ```
 
 ### `nodes.py`
@@ -184,7 +185,6 @@ Lets the whole pipeline be developed and tested without live API dependency. The
 
 ## Future additions
 
-- `cli.py` — terminal interface (`python -m flight_router CKG VIE 2026-09-15`)
 - **Date-range search** — accept a window (e.g., "depart Sep 12–18, return Sep 22–28") and use `fli.search_dates` to find the cheapest date pairings before pricing routings. Major win for flexible travel.
 - Kiwi.com integration for self-transfer routings
 - Transit-friendliness scoring per hub (visa, airport quality, layover utility)
