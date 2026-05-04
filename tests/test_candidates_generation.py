@@ -78,3 +78,77 @@ def test_southeast_asia_to_china_does_not_route_through_europe():
     for c in one_stops:
         assert c.hub_codes[0] not in eu_codes
         assert c.hub_codes[0] not in na_codes
+
+
+def test_train_fly_generated_only_for_ckg_origin():
+    """include_train should be inert for non-CKG origins."""
+    from_dad = generate_candidates("DAD", "BKK", max_stops=0, include_train=True)
+    assert all(not c.has_train_leg for c in from_dad)
+
+
+def test_train_fly_includes_train_then_flight():
+    cands = generate_candidates("CKG", "BKK", max_stops=0, include_train=True)
+    train_options = [c for c in cands if c.has_train_leg]
+    assert len(train_options) >= 1
+    for c in train_options:
+        # First leg must be TRAIN starting at CKG-N
+        assert c.legs[0].mode == TRAIN
+        assert c.legs[0].origin == "CKG-N"
+        # Subsequent legs must be FLIGHT
+        for leg in c.legs[1:]:
+            assert leg.mode == FLIGHT
+
+
+def test_train_fly_train_leg_carries_cny_cost_and_duration():
+    cands = generate_candidates("CKG", "BKK", max_stops=0, include_train=True)
+    train_options = [c for c in cands if c.has_train_leg]
+    assert any(c.legs[0].cost_cny is not None for c in train_options)
+    assert any(c.legs[0].duration_min is not None for c in train_options)
+
+
+def test_rail_to_airport_transfer_for_hkg_wk():
+    """Train arriving at HKG-WK should be followed by a flight from HKG."""
+    cands = generate_candidates("CKG", "VIE", max_stops=0, include_train=True)
+    via_hkg = [
+        c for c in cands
+        if c.has_train_leg and c.legs[0].destination == "HKG-WK"
+    ]
+    assert len(via_hkg) >= 1
+    for c in via_hkg:
+        assert c.legs[1].origin == "HKG"   # transfer applied
+        assert c.legs[1].destination == "VIE"
+
+
+def test_train_options_excluded_when_include_train_false():
+    cands_with = generate_candidates("CKG", "BKK", max_stops=0, include_train=True)
+    cands_without = generate_candidates("CKG", "BKK", max_stops=0, include_train=False)
+    train_count_with = sum(c.has_train_leg for c in cands_with)
+    train_count_without = sum(c.has_train_leg for c in cands_without)
+    assert train_count_with > 0
+    assert train_count_without == 0
+
+
+def test_train_plus_one_stop_for_longhaul_europe():
+    """For CKG → EUROPE, the system should also generate train+fly+via-hub options."""
+    cands = generate_candidates("CKG", "VIE", max_stops=1, include_train=True)
+    train_one_stops = [
+        c for c in cands
+        if c.has_train_leg and len(c.legs) == 3
+    ]
+    assert len(train_one_stops) >= 1
+    for c in train_one_stops:
+        assert c.legs[0].mode == TRAIN
+        assert c.legs[1].mode == FLIGHT
+        assert c.legs[2].mode == FLIGHT
+        # Final leg ends at VIE
+        assert c.legs[-1].destination == "VIE"
+
+
+def test_train_plus_one_stop_not_generated_for_short_haul():
+    """CKG → BKK (SE Asia) should NOT trigger the longhaul train+1-stop branch."""
+    cands = generate_candidates("CKG", "BKK", max_stops=1, include_train=True)
+    train_three_leg = [
+        c for c in cands
+        if c.has_train_leg and len(c.legs) == 3
+    ]
+    assert len(train_three_leg) == 0

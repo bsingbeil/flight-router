@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from nodes import NODES, Node
+from connections import TrainConnection, get_train_connections_from
 
 
 # ---------- Mode constants ----------
@@ -73,6 +74,14 @@ class Itinerary:
             else:
                 parts.append(arrow + leg.destination)
         return "".join(parts)
+
+
+# Rail nodes that aren't co-located with an airport must transfer to a nearby
+# airport before the next flight leg. Maps rail-arrival code → flight-departure code.
+RAIL_TO_AIRPORT: dict[str, str] = {
+    "HKG-WK": "HKG",   # West Kowloon HSR → HKG airport (~30–40min)
+    # CKG-N → CKG is implicit (CKG-N is only ever an *origin* for trains)
+}
 
 
 # ---------- Geographic transit rules ----------
@@ -177,5 +186,55 @@ def generate_candidates(
                 Leg(mode=FLIGHT, origin=origin_code, destination=hub.code),
                 Leg(mode=FLIGHT, origin=hub.code, destination=destination_code),
             ]))
+
+    # Stage 3: train + fly (CKG-only currently)
+    if include_train and origin_code == "CKG":
+        for tc in get_train_connections_from("CKG-N"):
+            train_arrival = tc.destination
+            airport_to_fly_from = RAIL_TO_AIRPORT.get(train_arrival, train_arrival)
+
+            # Skip if the train terminus *is* the destination (no flight needed)
+            if airport_to_fly_from == destination_code:
+                continue
+
+            # Skip if airport-to-fly-from isn't a valid flight node
+            if airport_to_fly_from not in NODES:
+                continue
+            if NODES[airport_to_fly_from].node_type not in {"airport", "both"}:
+                continue
+
+            train_leg = Leg(
+                mode=TRAIN,
+                origin="CKG-N",
+                destination=train_arrival,
+                duration_min=tc.duration_min,
+                cost_cny=tc.cost_cny_2nd_class,
+                notes=tc.notes,
+            )
+
+            # Direct flight from rail-airport to destination
+            candidates.append(Itinerary(legs=[
+                train_leg,
+                Leg(mode=FLIGHT, origin=airport_to_fly_from, destination=destination_code),
+            ]))
+
+            # Longhaul extension: train + 1-stop flight for EUROPE / NORTH_AMERICA destinations
+            # Only when max_stops >= 1 (train leg doesn't count as a flight stop).
+            LONGHAUL_REGIONS = {"EUROPE", "NORTH_AMERICA"}
+            if max_stops >= 1 and destination.region in LONGHAUL_REGIONS:
+                # Reuse the same transit-region rules used for pure-flight 1-stops,
+                # but anchored on the airport we're flying out of after the train.
+                rail_origin_region = NODES[airport_to_fly_from].region
+                t_regions = _valid_transit_regions(rail_origin_region, destination.region)
+                t_hubs = _airport_hubs_in_regions(
+                    t_regions,
+                    exclude={airport_to_fly_from, destination_code, origin_code},
+                )
+                for hub in t_hubs:
+                    candidates.append(Itinerary(legs=[
+                        train_leg,
+                        Leg(mode=FLIGHT, origin=airport_to_fly_from, destination=hub.code),
+                        Leg(mode=FLIGHT, origin=hub.code, destination=destination_code),
+                    ]))
 
     return candidates
