@@ -30,10 +30,11 @@ Read `ARCHITECTURE.md` for the full layered explanation. Read `README.md` for us
 
 ## Immediate next steps
 
-1. Patch fli's price parser upstream (or fork) so the intra-China zero-price bug doesn't drop options. The price block lives in a protobuf field that fli's `_parse_price_info` doesn't currently decode for CNY-denominated results.
-2. Add date-range search using `fli.search_dates` — see ARCHITECTURE.md §5.1 for the design. Major win for flexible travel.
-3. Consider Kiwi.com integration (ARCHITECTURE.md §5.3) for self-transfer routings — would also work around the fli zero-price issue by providing a second price source.
-4. Rate-limiting: rapid-fire queries against fli return HTTP 429s. The pricer concurrency is set to 6 workers, which seems to be near the threshold. Add backoff/retry if results consistently show "no complete pricings."
+1. **Build a GUI.** Terminal-only is not the destination — the tool is meant to be used regularly, and the CLI is a stopgap. Likely shape: a small local web UI (Flask/FastAPI + a single HTML page) so the search form, results table, and the savings/hr explanation are all rendered properly. The existing `cli.py` becomes one of two front-ends to the same pipeline; the core (`generate_candidates → price_candidates → format_results`) stays unchanged.
+2. Patch fli's price parser upstream (or fork) so the intra-China zero-price bug doesn't drop options. The price block lives in a protobuf field that fli's `_parse_price_info` doesn't currently decode for CNY-denominated results.
+3. Add date-range search using `fli.search_dates` — see ARCHITECTURE.md §5.1 for the design. Major win for flexible travel.
+4. Consider Kiwi.com integration (ARCHITECTURE.md §5.3) for self-transfer routings — would also work around the fli zero-price issue by providing a second price source.
+5. Rate-limiting: rapid-fire queries against fli return HTTP 429s. The pricer concurrency is set to 6 workers, which seems to be near the threshold. Add backoff/retry if results consistently show "no complete pricings."
 
 ## Conventions
 

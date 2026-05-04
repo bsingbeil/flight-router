@@ -185,6 +185,7 @@ Lets the whole pipeline be developed and tested without live API dependency. The
 
 ## Future additions
 
+- **GUI** — a small local web UI (Flask/FastAPI + one HTML page) so searches and results don't live in the terminal. The CLI stays as a second front-end to the same pipeline; nothing in the core changes.
 - **Date-range search** — accept a window (e.g., "depart Sep 12–18, return Sep 22–28") and use `fli.search_dates` to find the cheapest date pairings before pricing routings. Major win for flexible travel.
 - Kiwi.com integration for self-transfer routings
 - Transit-friendliness scoring per hub (visa, airport quality, layover utility)
