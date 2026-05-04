@@ -30,7 +30,7 @@ import currency
 
 # ---------- Configuration ----------
 
-USE_MOCK = True          # set to False once fli is installed and verified
+USE_MOCK = False         # set to False once fli is installed and verified
 MAX_CONCURRENT_QUERIES = 6   # don't hammer Google Flights
 
 # Transfer time penalty between flight legs (minutes).

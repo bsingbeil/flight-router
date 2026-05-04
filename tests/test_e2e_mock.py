@@ -1,10 +1,15 @@
-"""End-to-end smoke test against the mock pricer (USE_MOCK = True)."""
+"""End-to-end smoke test that forces the mock pricer regardless of pricer.USE_MOCK."""
+import pytest
+
 import pricer
 from candidates import generate_candidates
 
 
-def test_pricer_module_uses_mock_by_default():
-    assert pricer.USE_MOCK is True
+@pytest.fixture(autouse=True)
+def _force_mock_pricer(monkeypatch):
+    """Force the mock pricer for all tests in this module, regardless of pricer.USE_MOCK."""
+    monkeypatch.setattr(pricer, "USE_MOCK", True)
+    monkeypatch.setattr(pricer, "_fli_search", pricer._mock_fli_search)
 
 
 def test_e2e_ckg_to_bkk_with_train():
