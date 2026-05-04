@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.fx_cache.json
+*.preview.html
+docs/superpowers/plans/.history/
