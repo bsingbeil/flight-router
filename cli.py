@@ -63,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
         ranked = pricer.rank_by_cost(priced)
 
     print()
-    print(pricer.format_results(ranked, top_n=args.top))
+    print(pricer.format_results(ranked, top_n=args.top, sort_by=args.sort))
     print()
     print(f"[FX source: {currency.get_source()}]")
     return 0

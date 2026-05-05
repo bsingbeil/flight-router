@@ -319,42 +319,68 @@ def rank_by_duration(priced: list[PricedItinerary]) -> list[PricedItinerary]:
 
 # ---------- Pretty-printing ----------
 
-def format_results(priced: list[PricedItinerary], top_n: int = 10) -> str:
-    """Format ranked itineraries with a 'savings/hr vs fastest' comparison column.
+def format_results(
+    priced: list[PricedItinerary],
+    top_n: int = 10,
+    sort_by: str = "cost",
+) -> str:
+    """Format ranked itineraries with a trade-off comparison column.
 
-    The savings/hr value answers: 'how much do I save per extra hour of
-    travel time, by choosing this option over the fastest one?'
+    The anchor depends on `sort_by`:
+      - "cost"     → row 1 is the cheapest. Column "extra/hr" shows extra cost
+                     per hour saved by choosing this row vs the cheapest.
+      - "duration" → row 1 is the fastest. Column "savings/hr" shows savings
+                     per extra hour of travel vs the fastest.
 
-    A positive number = cheaper but slower (the trade-off you'd typically
-    take if the rate is high enough to be worth your time).
-    A negative number = both more expensive AND slower than the fastest.
-    Strictly worse — usually skip.
+    Rows that are strictly worse than the anchor on the relevant axis (e.g.,
+    slower AND more expensive than the cheapest in cost mode) show "—".
     """
     complete = [p for p in priced if p.is_complete]
     if not complete:
         return "(no complete pricings)"
 
-    fastest = min(complete, key=lambda p: p.total_duration_min)
     sym = currency.display_symbol()
 
-    header = f"{'#':>3}  {'Cost':>8}  {'Time':>7}  {'savings/hr':>12}  Routing"
-    lines = [header, "-" * 90]
+    if sort_by == "duration":
+        anchor = min(complete, key=lambda p: p.total_duration_min)
+        anchor_label = "(fastest)"
+        col_label = "savings/hr"
+        intent = "savings/hr = how much you save per extra hour vs the fastest option"
+    else:  # "cost"
+        anchor = min(complete, key=lambda p: p.total_cost)
+        anchor_label = "(cheapest)"
+        col_label = "extra/hr"
+        intent = "extra/hr = how much you pay per hour saved vs the cheapest option"
+
+    header = f"{'#':>3}  {'Cost':>8}  {'Time':>7}  {col_label:>12}  Routing"
+    lines = [intent, "", header, "-" * 90]
 
     for i, p in enumerate(priced[:top_n], 1):
         cost_str = currency.format_amount(p.total_cost)
         dur_str = p.total_duration_human
 
-        if p is fastest:
-            comp_str = "(fastest)"
-        else:
-            extra_hr = (p.total_duration_min - fastest.total_duration_min) / 60
-            cost_diff = fastest.total_cost - p.total_cost   # +ve = this is cheaper
+        if p is anchor:
+            comp_str = anchor_label
+        elif sort_by == "duration":
+            # this is slower than fastest; show how much we save per extra hour.
+            extra_hr = (p.total_duration_min - anchor.total_duration_min) / 60
+            cost_diff = anchor.total_cost - p.total_cost   # +ve = this is cheaper
             if extra_hr <= 0:
                 comp_str = "—"
             else:
                 rate = cost_diff / extra_hr
                 sign = "" if rate >= 0 else "-"
                 comp_str = f"{sign}{sym}{abs(rate):,.0f}/hr"
+        else:  # cost mode
+            # this is more expensive than cheapest; show how much we pay per hour saved.
+            saved_hr = (anchor.total_duration_min - p.total_duration_min) / 60
+            extra_cost = p.total_cost - anchor.total_cost   # +ve = this is more expensive
+            if saved_hr <= 0:
+                # slower (or equal) AND more expensive — strictly worse than the anchor.
+                comp_str = "—"
+            else:
+                rate = extra_cost / saved_hr
+                comp_str = f"{sym}{rate:,.0f}/hr"
 
         lines.append(f"{i:>3}.  {cost_str:>8}  {dur_str:>7}  {comp_str:>12}  {p.itinerary.describe()}")
 
@@ -384,9 +410,9 @@ if __name__ == "__main__":
     priced = price_candidates(cands, date)
 
     print("\n--- Sorted by cost ---")
-    print(format_results(rank_by_cost(priced), top_n=8))
+    print(format_results(rank_by_cost(priced), top_n=8, sort_by="cost"))
     print("\n--- Sorted by time ---")
-    print(format_results(rank_by_duration(priced), top_n=8))
+    print(format_results(rank_by_duration(priced), top_n=8, sort_by="duration"))
 
     # Same for CKG -> BKK with train option enabled.
     print()
@@ -396,6 +422,6 @@ if __name__ == "__main__":
     cands = generate_candidates(origin, destination, max_stops=1, include_train=True)
     priced = price_candidates(cands, date)
     print("\n--- Sorted by cost ---")
-    print(format_results(rank_by_cost(priced), top_n=10))
+    print(format_results(rank_by_cost(priced), top_n=10, sort_by="cost"))
 
     print(f"\n[FX source: {currency.get_source()}]")

@@ -40,4 +40,6 @@ def test_main_runs_against_mock(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "CKG" in out and "BKK" in out
-    assert "savings/hr" in out
+    # Default sort is cost, so the table is anchored on the cheapest row.
+    assert "(cheapest)" in out
+    assert "extra/hr" in out
