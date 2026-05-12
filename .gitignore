@@ -6,3 +6,6 @@ __pycache__/
 .fx_cache.json
 *.preview.html
 docs/superpowers/plans/.history/
+
+# macOS
+.DS_Store
