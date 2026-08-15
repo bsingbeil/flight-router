@@ -28,10 +28,10 @@ env:
 EOF
 }
 
-thread="main"; fresh=0; model="${PI_BRIDGE_MODEL:-}"; raw=0; args=()
+thread=""; thread_explicit=0; fresh=0; model="${PI_BRIDGE_MODEL:-}"; raw=0; args=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    -t|--thread) thread="$2"; shift 2 ;;
+    -t|--thread) thread="$2"; thread_explicit=1; shift 2 ;;
     --new)       fresh=1; shift ;;
     -m|--model)  model="$2"; shift 2 ;;
     --raw)       raw=1; shift ;;
@@ -65,10 +65,10 @@ root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 # KEEP IN SYNC with the identical block in ask-claude.
 lane_context() {
   local me="$1" reg mine="" others="" found=0
-  local l_name l_agent l_session l_dir l_branch l_owns l_created
+  local l_name l_agent l_session l_dir l_branch l_owns l_created l_claimed
   reg="$(git rev-parse --git-common-dir 2>/dev/null)/lanes.tsv"
   [ -f "$reg" ] || return 0
-  while IFS=$'\t' read -r l_name l_agent l_session l_dir l_branch l_owns l_created; do
+  while IFS=$'\t' read -r l_name l_agent l_session l_dir l_branch l_owns l_created l_claimed; do
     [ -n "$l_name" ] && [ "$l_name" != "name" ] || continue
     if [ "$l_name" = "$me" ]; then
       found=1; mine="$l_owns"
@@ -90,6 +90,27 @@ lane_context() {
   return 0
 }
 
+# Default thread = the lane THIS agent session claimed. Two sessions in one
+# worktree would otherwise both fall back to "main" and interleave their
+# conversations in a single Pi thread. KEEP IN SYNC with ask-claude.
+lane_for_session() {
+  local reg me="${CLAUDE_CODE_SESSION_ID:-${PI_SESSION_ID:-}}"
+  local l_name l_agent l_session l_dir l_branch l_owns l_created l_claimed
+  [ -n "$me" ] || return 0
+  reg="$(git -C "$root" rev-parse --git-common-dir 2>/dev/null)/lanes.tsv"
+  [ -f "$reg" ] || return 0
+  while IFS=$'\t' read -r l_name l_agent l_session l_dir l_branch l_owns l_created l_claimed; do
+    [ -n "$l_name" ] && [ "$l_name" != "name" ] || continue
+    [ "$l_claimed" = "$me" ] && { printf '%s' "$l_name"; return 0; }
+  done < <(tail -n +2 "$reg")
+  return 0
+}
+
+if [ "$thread_explicit" -eq 0 ]; then
+  thread="$(cd "$root" && lane_for_session)"
+  thread="${thread:-main}"
+fi
+
 slug="$(basename "$root" | tr -c '[:alnum:]' '-' | sed 's/-*$//')"
 session="bridge-${slug}-${thread}"
 [ "$fresh" -eq 1 ] && session="${session}-$(date +%Y%m%d-%H%M%S)"
@@ -108,4 +129,22 @@ set -- -p --session-id "$session" --approve --append-system-prompt "$preamble"
 [ -n "$model" ] && set -- "$@" --model "$model"
 
 [ "$raw" -eq 1 ] || echo "── ask-pi → ${session} (${root}) ──" >&2
-AGENT_BRIDGE_DEPTH=$((depth + 1)) exec pi "$@" "$msg"
+
+# One caller per thread at a time. Two processes appending to one session
+# transcript interleave it; this turns that into a loud error. Not `exec`,
+# so the trap can release the lock. KEEP IN SYNC with ask-claude.
+lock="${TMPDIR:-/tmp}/agent-bridge-${session}.lock"
+if ! mkdir "$lock" 2>/dev/null; then
+  holder="$(cat "$lock/pid" 2>/dev/null || true)"
+  if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+    echo "ask-pi: thread '${thread}' is already in use by pid ${holder}." >&2
+    echo "        Use -t <name> for a separate thread, or claim a lane so this session gets its own." >&2
+    exit 4
+  fi
+  rm -rf "$lock"                       # stale lock from a dead process
+  mkdir "$lock" 2>/dev/null || { echo "ask-pi: cannot lock ${session}" >&2; exit 4; }
+fi
+echo $$ > "$lock/pid"
+trap 'rm -rf "$lock"' EXIT INT TERM
+
+AGENT_BRIDGE_DEPTH=$((depth + 1)) pi "$@" "$msg"

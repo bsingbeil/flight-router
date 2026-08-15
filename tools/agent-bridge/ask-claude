@@ -26,10 +26,10 @@ env:
 EOF
 }
 
-thread="main"; model="${CLAUDE_BRIDGE_MODEL:-claude-sonnet-5}"; raw=0; args=()
+thread=""; thread_explicit=0; model="${CLAUDE_BRIDGE_MODEL:-claude-sonnet-5}"; raw=0; args=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    -t|--thread) thread="$2"; shift 2 ;;
+    -t|--thread) thread="$2"; thread_explicit=1; shift 2 ;;
     -m|--model)  model="$2"; shift 2 ;;
     --raw)       raw=1; shift ;;
     -h|--help)   usage; exit 0 ;;
@@ -58,10 +58,10 @@ root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 # KEEP IN SYNC with the identical block in ask-pi.
 lane_context() {
   local me="$1" reg mine="" others="" found=0
-  local l_name l_agent l_session l_dir l_branch l_owns l_created
+  local l_name l_agent l_session l_dir l_branch l_owns l_created l_claimed
   reg="$(git rev-parse --git-common-dir 2>/dev/null)/lanes.tsv"
   [ -f "$reg" ] || return 0
-  while IFS=$'\t' read -r l_name l_agent l_session l_dir l_branch l_owns l_created; do
+  while IFS=$'\t' read -r l_name l_agent l_session l_dir l_branch l_owns l_created l_claimed; do
     [ -n "$l_name" ] && [ "$l_name" != "name" ] || continue
     if [ "$l_name" = "$me" ]; then
       found=1; mine="$l_owns"
@@ -82,6 +82,27 @@ lane_context() {
   [ "$found" -eq 0 ] && [ -n "$others" ] && printf '\nYou have not claimed a lane. Run `lane new <name> --owns <path>` before editing.'
   return 0
 }
+
+# Default thread = the lane THIS agent session claimed. Two sessions in one
+# worktree would otherwise both fall back to "main" and interleave their
+# conversations in a single thread. KEEP IN SYNC with ask-pi.
+lane_for_session() {
+  local reg me="${CLAUDE_CODE_SESSION_ID:-${PI_SESSION_ID:-}}"
+  local l_name l_agent l_session l_dir l_branch l_owns l_created l_claimed
+  [ -n "$me" ] || return 0
+  reg="$(git -C "$root" rev-parse --git-common-dir 2>/dev/null)/lanes.tsv"
+  [ -f "$reg" ] || return 0
+  while IFS=$'\t' read -r l_name l_agent l_session l_dir l_branch l_owns l_created l_claimed; do
+    [ -n "$l_name" ] && [ "$l_name" != "name" ] || continue
+    [ "$l_claimed" = "$me" ] && { printf '%s' "$l_name"; return 0; }
+  done < <(tail -n +2 "$reg")
+  return 0
+}
+
+if [ "$thread_explicit" -eq 0 ]; then
+  thread="$(cd "$root" && lane_for_session)"
+  thread="${thread:-main}"
+fi
 
 # Deterministic UUID per (repo, thread) so the thread persists across calls.
 hash="$(printf 'claude-bridge:%s:%s' "$root" "$thread" | md5 -q 2>/dev/null || printf 'claude-bridge:%s:%s' "$root" "$thread" | md5sum | cut -d' ' -f1)"
@@ -109,7 +130,22 @@ fi
 cd "$root"
 preamble="${preamble}$(lane_context "$thread")"
 [ "$raw" -eq 1 ] || echo "── ask-claude → ${uuid} (${root}) ──" >&2
-AGENT_BRIDGE_DEPTH=$((depth + 1)) exec claude -p \
+# One caller per thread at a time — see ask-pi. Not `exec`, so the trap runs.
+lock="${TMPDIR:-/tmp}/agent-bridge-claude-${uuid}.lock"
+if ! mkdir "$lock" 2>/dev/null; then
+  holder="$(cat "$lock/pid" 2>/dev/null || true)"
+  if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+    echo "ask-claude: thread '${thread}' is already in use by pid ${holder}." >&2
+    echo "            Use -t <name> for a separate thread, or claim a lane so this session gets its own." >&2
+    exit 4
+  fi
+  rm -rf "$lock"
+  mkdir "$lock" 2>/dev/null || { echo "ask-claude: cannot lock ${uuid}" >&2; exit 4; }
+fi
+echo $$ > "$lock/pid"
+trap 'rm -rf "$lock"' EXIT INT TERM
+
+AGENT_BRIDGE_DEPTH=$((depth + 1)) claude -p \
   "${sess[@]}" \
   --model "$model" \
   --max-budget-usd "$budget" \

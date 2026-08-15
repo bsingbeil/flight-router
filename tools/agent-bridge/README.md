@@ -14,6 +14,17 @@ take `-t <thread>` for parallel conversations, and are threaded per git repo
 root so no context bleeds between projects. A depth guard stops the two agents
 ping-ponging past 2 hops.
 
+**The default thread is this session's lane, not a constant.** `lane new` records
+the agent session that claimed it (`CLAUDE_CODE_SESSION_ID`), and `ask-*` default
+to that lane's name. Without this, two Claude sessions in one worktree would both
+fall back to thread `main` and interleave their conversations in a single Pi
+thread — worktree keying isolates across worktrees, not within one. If the
+session has claimed no lane, the default is still `main`.
+
+A lock backs it up: one caller per thread at a time. A second concurrent caller
+gets `exit 4` and is told to use `-t` or claim a lane, rather than silently
+interleaving. Locks held by dead processes are reclaimed automatically.
+
 **The thread name doubles as the lane name.** If a lane of that name is claimed,
 `ask-pi -t <name>` / `ask-claude -t <name>` inject its ownership rules into the
 receiving agent's instructions automatically — owned paths, other lanes' paths,

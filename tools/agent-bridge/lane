@@ -19,7 +19,7 @@ die() { echo "lane: $*" >&2; exit 1; }
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not inside a git repo"
 common="$(cd "$(git rev-parse --git-common-dir)" && pwd)"
 REG="${common}/lanes.tsv"
-[ -f "$REG" ] || printf 'name\tagent\tsession\tdir\tbranch\towns\tcreated\n' > "$REG"
+[ -f "$REG" ] || printf 'name\tagent\tsession\tdir\tbranch\towns\tcreated\tclaimed_by\n' > "$REG"
 
 reg_rows() { tail -n +2 "$REG" 2>/dev/null; }
 
@@ -27,8 +27,8 @@ lane_ls() {
   local rows; rows="$(reg_rows)"
   [ -n "$rows" ] || { echo "no lanes claimed in this repo"; return 0; }
   printf '%-14s %-7s %-22s %-28s %s\n' NAME AGENT SESSION BRANCH OWNS
-  local r_name r_agent r_session r_dir r_branch r_owns r_created
-  while IFS=$'\t' read -r r_name r_agent r_session r_dir r_branch r_owns r_created; do
+  local r_name r_agent r_session r_dir r_branch r_owns r_created r_claimed
+  while IFS=$'\t' read -r r_name r_agent r_session r_dir r_branch r_owns r_created r_claimed; do
     [ -n "$r_name" ] || continue
     printf '%-14s %-7s %-22s %-28s %s\n' "$r_name" "$r_agent" "$r_session" "$r_branch" "${r_owns:-<whole repo>}"
   done <<< "$rows"
@@ -47,9 +47,9 @@ check_overlap() {
   # NOTE: every variable here is local and r_-prefixed on purpose. `read` in a
   # loop overwrites caller variables of the same name, and blanks them at EOF.
   local newname="$1" newowns="$2" hit=0
-  local r_name r_agent r_session r_dir r_branch r_owns r_created a b
+  local r_name r_agent r_session r_dir r_branch r_owns r_created r_claimed a b
   [ -n "$newowns" ] || { reg_rows | grep -q . && echo "  ⚠ this lane claims the WHOLE repo while other lanes exist — expect collisions" >&2; return 0; }
-  while IFS=$'\t' read -r r_name r_agent r_session r_dir r_branch r_owns r_created; do
+  while IFS=$'\t' read -r r_name r_agent r_session r_dir r_branch r_owns r_created r_claimed; do
     [ -n "$r_name" ] && [ "$r_name" != "$newname" ] || continue
     [ -n "$r_owns" ] || { echo "  ⚠ lane '$r_name' claims the whole repo — it overlaps you" >&2; hit=1; continue; }
     for a in ${newowns//,/ }; do
@@ -100,8 +100,12 @@ lane_new() {
   echo "checking for collisions with existing lanes…" >&2
   check_overlap "$name" "$owns"
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$name" "$agent" "$name" "$dir" "$branch" "$owns" "$(date +%Y-%m-%d)" >> "$REG"
+  # claimed_by = the agent session that ran `lane new`. ask-pi/ask-claude use it
+  # to default their bridge thread to THIS session's lane, so two sessions in one
+  # worktree cannot silently share the default thread.
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$agent" "$name" "$dir" "$branch" "$owns" "$(date +%Y-%m-%d)" \
+    "${CLAUDE_CODE_SESSION_ID:-${PI_SESSION_ID:-}}" >> "$REG"
 
   local opencmd guard
   if [ "$agent" = "claude" ]; then
