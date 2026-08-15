@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# sync — push the canonical agent-bridge scripts to every repo that mirrors them.
+#
+# This directory is canonical; ~/bin symlinks here. The mirrors exist so the
+# tooling survives losing this checkout. Run after changing any script, then
+# commit the repos this names.
+#
+#   sync            copy where the mirror differs, report what changed
+#   sync --check    report only, change nothing (exit 1 if anything is stale)
+set -euo pipefail
+
+SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPTS=(ask-pi ask-claude lane README.md sync)
+
+TARGETS=(
+  /Users/bsingbeil/Sites/infrastructure
+  /Users/bsingbeil/Sites/cool-pet-beds
+  /Users/bsingbeil/Sites/energy-storage
+  /Users/bsingbeil/Sites/flight-router
+  /Users/bsingbeil/Sites/heat-pump
+  /Users/bsingbeil/Sites/hk-imports
+  /Users/bsingbeil/Sites/polymarket-system
+  /Users/bsingbeil/Sites/design
+)
+
+check_only=0
+[ "${1-}" = "--check" ] && check_only=1
+
+stale=0 copied=0 skipped=0
+
+for target in "${TARGETS[@]}"; do
+  if [ ! -d "$target" ]; then
+    echo "MISSING  $target — skipped"
+    skipped=$((skipped + 1))
+    continue
+  fi
+  dest="$target/tools/agent-bridge"
+  changes=()
+
+  for f in "${SCRIPTS[@]}"; do
+    if [ ! -f "$dest/$f" ]; then
+      changes+=("+$f")
+    elif ! cmp -s "$SRC/$f" "$dest/$f"; then
+      # A mirror that differs AND is newer than canonical was edited in place.
+      # Overwriting would lose that edit, so surface it instead.
+      if [ "$dest/$f" -nt "$SRC/$f" ]; then
+        echo "DIVERGED $target/tools/agent-bridge/$f is NEWER than canonical — not overwriting"
+        echo "         diff: diff $SRC/$f $dest/$f"
+        stale=$((stale + 1))
+        continue
+      fi
+      changes+=("~$f")
+    fi
+  done
+
+  if [ ${#changes[@]} -eq 0 ]; then
+    echo "ok       $target"
+    continue
+  fi
+
+  stale=$((stale + 1))
+  if [ "$check_only" -eq 1 ]; then
+    echo "STALE    $target  (${changes[*]})"
+    continue
+  fi
+
+  mkdir -p "$dest"
+  for f in "${SCRIPTS[@]}"; do cp "$SRC/$f" "$dest/$f"; done
+  chmod 755 "$dest"/ask-pi "$dest"/ask-claude "$dest"/lane "$dest"/sync
+  echo "synced   $target  (${changes[*]})"
+  copied=$((copied + 1))
+done
+
+echo
+if [ "$check_only" -eq 1 ]; then
+  [ "$stale" -eq 0 ] && echo "all mirrors current" || echo "$stale mirror(s) stale — run sync"
+  exit $([ "$stale" -eq 0 ] && echo 0 || echo 1)
+fi
+echo "synced $copied repo(s), $skipped missing. Commit tools/agent-bridge/ in each repo named above."

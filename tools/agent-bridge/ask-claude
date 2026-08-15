@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# ask-claude — Pi → Claude Code. Sends a message to Claude's bridge session for
+# the CURRENT repo and prints Claude's reply on stdout.
+#
+#   ask-claude "acceptance criterion 3 is ambiguous — does 'archived' mean archived_at set?"
+#   git diff | ask-claude "review before I commit"
+#
+# Claude answers in REVIEW mode: read-only tools (Read/Grep/Glob/git read cmds).
+# It will not edit files, commit, or push from this bridge — that is Pi's job.
+# Session is keyed to the git repo root, so the thread has memory per repo.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage: ask-claude [options] <message>...   (message may also come from stdin)
+
+options:
+  -t, --thread NAME   named side-thread within this repo (default: main)
+  -m, --model NAME    override model (default: claude-sonnet-5)
+      --raw           print reply only, no header
+  -h, --help          this
+
+env:
+  CLAUDE_BRIDGE_MODEL    default model (default: claude-sonnet-5)
+  CLAUDE_BRIDGE_BUDGET   max USD per call (default: 0.50)
+EOF
+}
+
+thread="main"; model="${CLAUDE_BRIDGE_MODEL:-claude-sonnet-5}"; raw=0; args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -t|--thread) thread="$2"; shift 2 ;;
+    -m|--model)  model="$2"; shift 2 ;;
+    --raw)       raw=1; shift ;;
+    -h|--help)   usage; exit 0 ;;
+    --)          shift; args+=("$@"); break ;;
+    *)           args+=("$1"); shift ;;
+  esac
+done
+
+msg="${args[*]-}"
+# See ask-pi: `! -t 0` alone deadlocks under agent harnesses / launchd.
+if [ -p /dev/stdin ] || { [ ! -t 0 ] && [ -f /dev/stdin ]; }; then
+  stdin_msg="$(cat)"
+  [ -n "$stdin_msg" ] && msg="${msg}${msg:+$'\n\n'}${stdin_msg}"
+fi
+[ -n "${msg// }" ] || { usage >&2; exit 2; }
+
+depth="${AGENT_BRIDGE_DEPTH:-0}"
+if [ "$depth" -ge 2 ]; then
+  echo "ask-claude: bridge depth $depth — refusing to nest further (loop guard)." >&2
+  exit 3
+fi
+
+root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+
+# Deterministic UUID per (repo, thread) so the thread persists across calls.
+hash="$(printf 'claude-bridge:%s:%s' "$root" "$thread" | md5 -q 2>/dev/null || printf 'claude-bridge:%s:%s' "$root" "$thread" | md5sum | cut -d' ' -f1)"
+uuid="${hash:0:8}-${hash:8:4}-${hash:12:4}-${hash:16:4}-${hash:20:12}"
+
+preamble="This message came from Pi over the ask-claude bridge, not from a human.
+Your reply is piped straight back into Pi's context — write for an agent: terse,
+concrete, decisions not options. You are the REVIEWER here: you have read-only
+tools, so do not attempt edits, commits, or pushes; tell Pi what to change and
+where (file:line) and let Pi do it. If Pi is asking a judgment call that only
+Brendan can make, say so plainly in one line so Pi parks the task instead of
+guessing. Never print secrets."
+
+budget="${CLAUDE_BRIDGE_BUDGET:-0.50}"
+
+# Claude Code rejects --session-id if that session already exists, so the first
+# call creates the thread and every later call resumes it.
+proj="$(printf '%s' "$root" | sed 's/[^a-zA-Z0-9]/-/g')"
+if [ -f "$HOME/.claude/projects/${proj}/${uuid}.jsonl" ]; then
+  sess=(--resume "$uuid")
+else
+  sess=(--session-id "$uuid")
+fi
+
+cd "$root"
+[ "$raw" -eq 1 ] || echo "── ask-claude → ${uuid} (${root}) ──" >&2
+AGENT_BRIDGE_DEPTH=$((depth + 1)) exec claude -p \
+  "${sess[@]}" \
+  --model "$model" \
+  --max-budget-usd "$budget" \
+  --allowedTools "Read Grep Glob WebFetch Bash(git diff:*) Bash(git log:*) Bash(git status:*) Bash(git show:*) Bash(rg:*) Bash(ls:*)" \
+  --append-system-prompt "$preamble" \
+  "$msg"

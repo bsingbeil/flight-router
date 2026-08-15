@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# ask-pi — Claude Code → Pi. Sends a message to Pi's bridge session for the
+# CURRENT repo and prints Pi's reply on stdout, so the reply lands directly in
+# the caller's context. No copy-paste, no daemon.
+#
+#   ask-pi "fix the 429 handling in fetch.py:88, rerun the tests"
+#   git diff | ask-pi "review this diff"
+#   ask-pi --thread qc "start on the QC backfill"     # parallel thread
+#   ask-pi --new "clean slate: ..."                   # forget the thread
+#
+# Session is keyed to the git repo root, so each repo keeps its own memory and
+# nothing bleeds between projects. Runs from the repo root regardless of cwd.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage: ask-pi [options] <message>...     (message may also come from stdin)
+
+options:
+  -t, --thread NAME   named side-thread within this repo (default: main)
+      --new           start a fresh thread, discarding prior bridge history
+  -m, --model PATTERN override Pi's model (default: pi's own default)
+      --raw           print Pi's reply only, no header
+  -h, --help          this
+
+env:
+  PI_BRIDGE_MODEL     default model override
+EOF
+}
+
+thread="main"; fresh=0; model="${PI_BRIDGE_MODEL:-}"; raw=0; args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -t|--thread) thread="$2"; shift 2 ;;
+    --new)       fresh=1; shift ;;
+    -m|--model)  model="$2"; shift 2 ;;
+    --raw)       raw=1; shift ;;
+    -h|--help)   usage; exit 0 ;;
+    --)          shift; args+=("$@"); break ;;
+    *)           args+=("$1"); shift ;;
+  esac
+done
+
+msg="${args[*]-}"
+# Only read stdin when it is genuinely piped or redirected from a file.
+# Testing `! -t 0` is not enough: a non-tty stdin that never closes (agent
+# harnesses, launchd) makes `cat` block forever.
+if [ -p /dev/stdin ] || { [ ! -t 0 ] && [ -f /dev/stdin ]; }; then
+  stdin_msg="$(cat)"
+  [ -n "$stdin_msg" ] && msg="${msg}${msg:+$'\n\n'}${stdin_msg}"
+fi
+[ -n "${msg// }" ] || { usage >&2; exit 2; }
+
+# Loop guard: Claude → Pi → Claude → Pi ... stops here.
+depth="${AGENT_BRIDGE_DEPTH:-0}"
+if [ "$depth" -ge 2 ]; then
+  echo "ask-pi: bridge depth $depth — refusing to nest further (loop guard)." >&2
+  exit 3
+fi
+
+root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+slug="$(basename "$root" | tr -c '[:alnum:]' '-' | sed 's/-*$//')"
+session="bridge-${slug}-${thread}"
+[ "$fresh" -eq 1 ] && session="${session}-$(date +%Y%m%d-%H%M%S)"
+
+preamble="You are Pi, working in ${root}. This message came from Claude Code over
+the ask-pi bridge, not from a human — your reply is piped straight back into
+Claude's context, so write for an agent: terse, concrete, no pleasantries.
+Cite file:line for anything you changed and paste the actual command output that
+proves it. If you are blocked or the request is ambiguous, say exactly what you
+need in one line rather than guessing — Claude will call you again with it.
+Never print secrets. You may reply to Claude yourself with: ask-claude \"...\""
+
+cd "$root"
+set -- -p --session-id "$session" --approve --append-system-prompt "$preamble"
+[ -n "$model" ] && set -- "$@" --model "$model"
+
+[ "$raw" -eq 1 ] || echo "── ask-pi → ${session} (${root}) ──" >&2
+AGENT_BRIDGE_DEPTH=$((depth + 1)) exec pi "$@" "$msg"

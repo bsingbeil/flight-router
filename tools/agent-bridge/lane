@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# lane — claim a work lane and print a paste-ready coordinates block.
+#
+# A lane is one agent + one session + one set of files it is allowed to touch.
+# Run this when you set up a task list; paste the printed block into the other
+# window so both sides know where they are and who owns what.
+#
+#   lane new scraper --owns tools/rugby-shop-scraper
+#   lane new pricing --worktree feat/catalog-pricing --owns vendors/pricing
+#   lane ls
+#   lane rm scraper
+#
+# The registry lives in the repo's shared git dir, so every worktree of the
+# same repo sees the same lanes. It is never committed.
+set -euo pipefail
+
+die() { echo "lane: $*" >&2; exit 1; }
+
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not inside a git repo"
+common="$(cd "$(git rev-parse --git-common-dir)" && pwd)"
+REG="${common}/lanes.tsv"
+[ -f "$REG" ] || printf 'name\tagent\tsession\tdir\tbranch\towns\tcreated\n' > "$REG"
+
+reg_rows() { tail -n +2 "$REG" 2>/dev/null; }
+
+lane_ls() {
+  local rows; rows="$(reg_rows)"
+  [ -n "$rows" ] || { echo "no lanes claimed in this repo"; return 0; }
+  printf '%-14s %-7s %-22s %-28s %s\n' NAME AGENT SESSION BRANCH OWNS
+  local r_name r_agent r_session r_dir r_branch r_owns r_created
+  while IFS=$'\t' read -r r_name r_agent r_session r_dir r_branch r_owns r_created; do
+    [ -n "$r_name" ] || continue
+    printf '%-14s %-7s %-22s %-28s %s\n' "$r_name" "$r_agent" "$r_session" "$r_branch" "${r_owns:-<whole repo>}"
+  done <<< "$rows"
+}
+
+lane_rm() {
+  local target="${1:?usage: lane rm <name>}" tmp
+  grep -q "^${target}$(printf '\t')" "$REG" || die "no lane named '$target'"
+  tmp="$(mktemp)"; grep -v "^${target}$(printf '\t')" "$REG" > "$tmp"; mv "$tmp" "$REG"
+  echo "released lane '$target' (any git worktree it used is left in place — remove with: git worktree remove <path>)"
+}
+
+# Warn when a new lane's paths overlap one already claimed. Prefix match both
+# ways, so `vendors` vs `vendors/pricing` is caught.
+check_overlap() {
+  # NOTE: every variable here is local and r_-prefixed on purpose. `read` in a
+  # loop overwrites caller variables of the same name, and blanks them at EOF.
+  local newname="$1" newowns="$2" hit=0
+  local r_name r_agent r_session r_dir r_branch r_owns r_created a b
+  [ -n "$newowns" ] || { reg_rows | grep -q . && echo "  ⚠ this lane claims the WHOLE repo while other lanes exist — expect collisions" >&2; return 0; }
+  while IFS=$'\t' read -r r_name r_agent r_session r_dir r_branch r_owns r_created; do
+    [ -n "$r_name" ] && [ "$r_name" != "$newname" ] || continue
+    [ -n "$r_owns" ] || { echo "  ⚠ lane '$r_name' claims the whole repo — it overlaps you" >&2; hit=1; continue; }
+    for a in ${newowns//,/ }; do
+      for b in ${r_owns//,/ }; do
+        case "$a/" in "$b/"*) echo "  ⚠ '$a' is inside lane '$r_name' ($b)" >&2; hit=1 ;; esac
+        case "$b/" in "$a/"*) echo "  ⚠ lane '$r_name' ($b) is inside your '$a'" >&2; hit=1 ;; esac
+      done
+    done
+  done <<< "$(reg_rows)"
+  [ "$hit" -eq 0 ] || echo "  → pick disjoint paths, or give one of the lanes its own --worktree" >&2
+}
+
+lane_new() {
+  local name="" agent="pi" owns="" wt="" wt_branch=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --owns)     owns="${owns}${owns:+,}$2"; shift 2 ;;
+      --agent)    agent="$2"; shift 2 ;;
+      --worktree) wt=1; case "${2-}" in -*|"") wt_branch="" ;; *) wt_branch="$2"; shift ;; esac; shift ;;
+      -*)         die "unknown flag $1" ;;
+      *)          [ -z "$name" ] && name="$1" || die "unexpected arg $1"; shift ;;
+    esac
+  done
+  [ -n "$name" ] || die "usage: lane new <name> [--agent pi|claude] [--worktree [branch]] [--owns <path>]..."
+  grep -q "^${name}$(printf '\t')" "$REG" && die "lane '$name' already exists (lane ls)"
+
+  local root repo dir branch
+  root="$(git rev-parse --show-toplevel)"
+  repo="$(basename "$(dirname "$common")")"
+  [ "$(basename "$common")" = ".git" ] || repo="$(basename "$root")"
+
+  if [ -n "$wt" ]; then
+    wt_branch="${wt_branch:-lane/${name}}"
+    dir="$(dirname "$root")/${repo}-${name}"
+    if [ -d "$dir" ]; then
+      echo "reusing existing worktree at $dir"
+    elif git show-ref --verify --quiet "refs/heads/${wt_branch}"; then
+      git worktree add "$dir" "$wt_branch" >&2
+    else
+      git worktree add -b "$wt_branch" "$dir" >&2
+    fi
+    branch="$wt_branch"
+  else
+    dir="$root"
+    branch="$(git rev-parse --abbrev-ref HEAD)"
+  fi
+
+  echo "checking for collisions with existing lanes…" >&2
+  check_overlap "$name" "$owns"
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$name" "$agent" "$name" "$dir" "$branch" "$owns" "$(date +%Y-%m-%d)" >> "$REG"
+
+  local opencmd guard
+  if [ "$agent" = "claude" ]; then
+    opencmd="cd ${dir} && claude"
+  else
+    opencmd="cd ${dir} && pi --session-id ${name} -n \"${name}\""
+  fi
+  if [ -n "$wt" ]; then
+    guard="own worktree — commit freely on ${branch}"
+  elif [ -n "$owns" ]; then
+    guard="SHARED checkout — commit ONLY paths under: ${owns}. Never \`git add -A\`."
+  else
+    guard="SHARED checkout, no owned paths declared — re-run with --owns before editing anything."
+  fi
+
+  cat <<EOF
+
+━━━━━━━━━━ LANE: ${name} ━━━━━━━━━━
+directory   ${dir}
+session id  ${name}
+worktree    $([ -n "$wt" ] && echo "yes — dedicated" || echo "no — shared main checkout")
+branch      ${branch}
+owns        ${owns:-<not declared>}
+agent       ${agent}
+
+open this lane in a new terminal window:
+  ${opencmd}
+
+reach it from Claude Code (separate thread, does not touch the window's session):
+  ask-pi -t ${name} "<message>"
+
+rule: ${guard}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+EOF
+}
+
+case "${1-}" in
+  new)   shift; lane_new "$@" ;;
+  ls|"") lane_ls ;;
+  rm)    shift; lane_rm "$@" ;;
+  -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *)     die "unknown command '${1}' (new | ls | rm)" ;;
+esac
