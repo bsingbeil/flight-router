@@ -53,6 +53,35 @@ if [ "$depth" -ge 2 ]; then
 fi
 
 root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+# Lane context. The thread name doubles as the lane name, so a handoff carries
+# its file-ownership rules instead of relying on someone pasting them.
+# KEEP IN SYNC with the identical block in ask-pi.
+lane_context() {
+  local me="$1" reg mine="" others="" found=0
+  local l_name l_agent l_session l_dir l_branch l_owns l_created
+  reg="$(git rev-parse --git-common-dir 2>/dev/null)/lanes.tsv"
+  [ -f "$reg" ] || return 0
+  while IFS=$'\t' read -r l_name l_agent l_session l_dir l_branch l_owns l_created; do
+    [ -n "$l_name" ] && [ "$l_name" != "name" ] || continue
+    if [ "$l_name" = "$me" ]; then
+      found=1; mine="$l_owns"
+    else
+      others="${others}${others:+; }${l_name} owns ${l_owns:-<whole repo>}"
+    fi
+  done < <(tail -n +2 "$reg")
+
+  if [ "$found" -eq 1 ]; then
+    printf '\n\nLANE: this thread is lane "%s" on branch %s.' "$me" "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
+    if [ -n "$mine" ]; then
+      printf ' It owns ONLY: %s. Nothing outside that may be edited or committed, and never run `git add -A` — it would sweep up another lane'"'"'s unfinished work. Work that needs paths outside the lane is out of scope: say so instead of doing it.' "$mine"
+    else
+      printf ' No owned paths were declared for it, so confirm scope before editing.'
+    fi
+  fi
+  [ -n "$others" ] && printf '\nOther lanes are active in this repo — do NOT touch their paths: %s.' "$others"
+  [ "$found" -eq 0 ] && [ -n "$others" ] && printf '\nYou have not claimed a lane. Run `lane new <name> --owns <path>` before editing.'
+  return 0
+}
 
 # Deterministic UUID per (repo, thread) so the thread persists across calls.
 hash="$(printf 'claude-bridge:%s:%s' "$root" "$thread" | md5 -q 2>/dev/null || printf 'claude-bridge:%s:%s' "$root" "$thread" | md5sum | cut -d' ' -f1)"
@@ -78,6 +107,7 @@ else
 fi
 
 cd "$root"
+preamble="${preamble}$(lane_context "$thread")"
 [ "$raw" -eq 1 ] || echo "── ask-claude → ${uuid} (${root}) ──" >&2
 AGENT_BRIDGE_DEPTH=$((depth + 1)) exec claude -p \
   "${sess[@]}" \

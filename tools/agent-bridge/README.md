@@ -14,6 +14,13 @@ take `-t <thread>` for parallel conversations, and are threaded per git repo
 root so no context bleeds between projects. A depth guard stops the two agents
 ping-ponging past 2 hops.
 
+**The thread name doubles as the lane name.** If a lane of that name is claimed,
+`ask-pi -t <name>` / `ask-claude -t <name>` inject its ownership rules into the
+receiving agent's instructions automatically — owned paths, other lanes' paths,
+and the no-`git add -A` rule. A handoff therefore carries its own boundary
+instead of depending on someone pasting it (`lane_context()`, duplicated
+verbatim in both scripts — keep them in sync).
+
 ## This directory is the canonical copy
 
 `~/bin/ask-pi`, `~/bin/ask-claude` and `~/bin/lane` are **symlinks into this
