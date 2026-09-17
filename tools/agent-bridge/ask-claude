@@ -151,4 +151,4 @@ AGENT_BRIDGE_DEPTH=$((depth + 1)) claude -p \
   --max-budget-usd "$budget" \
   --allowedTools "Read Grep Glob WebFetch Bash(git diff:*) Bash(git log:*) Bash(git status:*) Bash(git show:*) Bash(rg:*) Bash(ls:*)" \
   --append-system-prompt "$preamble" \
-  "$msg"
+  "$msg" </dev/null   # stdin already consumed; an open pipe would stall the CLI (see ask-pi)

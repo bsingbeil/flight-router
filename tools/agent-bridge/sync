@@ -10,7 +10,16 @@
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPTS=(ask-pi ask-claude lane README.md sync)
+# Generic bridge tooling only. orchestrator-count.sh and check-task-filed.sh
+# are deliberately NOT here: both hardcode navigate-ops' tasks/inbox +
+# tasks/done layout and its PR conventions, so a mirror target would end up
+# counting THAT repo's unrelated files and reporting nonsense. See README.md
+# "What sync mirrors, and what it doesn't".
+SCRIPTS=(
+  ask-pi ask-claude lane README.md sync
+  dispatch.sh
+  lib/frontmatter.sh lib/portable-date.sh lib/repo-root.sh
+)
 
 TARGETS=(
   /Users/bsingbeil/Sites/infrastructure
@@ -65,8 +74,12 @@ for target in "${TARGETS[@]}"; do
   fi
 
   mkdir -p "$dest"
-  for f in "${SCRIPTS[@]}"; do cp "$SRC/$f" "$dest/$f"; done
-  chmod 755 "$dest"/ask-pi "$dest"/ask-claude "$dest"/lane "$dest"/sync
+  for f in "${SCRIPTS[@]}"; do
+    mkdir -p "$(dirname "$dest/$f")"
+    cp "$SRC/$f" "$dest/$f"
+  done
+  chmod 755 "$dest"/ask-pi "$dest"/ask-claude "$dest"/lane "$dest"/sync \
+    "$dest"/dispatch.sh
   echo "synced   $target  (${changes[*]})"
   copied=$((copied + 1))
 done
