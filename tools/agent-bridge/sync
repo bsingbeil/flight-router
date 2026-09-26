@@ -3,10 +3,20 @@
 #
 # This directory is canonical; ~/bin symlinks here. The mirrors exist so the
 # tooling survives losing this checkout. Run after changing any script, then
-# commit the repos this names.
+# commit AND push the repos this names.
 #
-#   sync            copy where the mirror differs, report what changed
+# A mirror is current when its PUSHED copy matches canonical: each file under
+# tools/agent-bridge/ at the mirror's origin default branch (fetched first).
+# The backup is what is on the remote, not whatever branch a checkout happens
+# to have out — a checkout parked on another session's feature branch says
+# nothing about whether the mirror exists.
+#
+#   sync            copy into each STALE mirror's working tree, report what changed
+#                   (PARKED, not written: checkout off the default branch or
+#                   tools/agent-bridge/ dirty — use a throwaway worktree)
 #   sync --check    report only, change nothing (exit 1 if anything is stale)
+#
+# SYNC_TARGETS (space-separated paths) replaces the target list — for tests.
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,6 +41,8 @@ TARGETS=(
   /Users/bsingbeil/Sites/polymarket-system
   /Users/bsingbeil/Sites/design
 )
+# shellcheck disable=SC2206  # word-splitting the override is the point
+[ -n "${SYNC_TARGETS:-}" ] && TARGETS=($SYNC_TARGETS)
 
 check_only=0
 [ "${1-}" = "--check" ] && check_only=1
@@ -43,35 +55,58 @@ for target in "${TARGETS[@]}"; do
     skipped=$((skipped + 1))
     continue
   fi
+  if ! git -C "$target" remote get-url origin >/dev/null 2>&1; then
+    echo "NOREMOTE $target — no origin, so no pushed backup to check"
+    stale=$((stale + 1))
+    continue
+  fi
+  git -C "$target" fetch -q origin 2>/dev/null ||
+    echo "WARN     $target — fetch failed; checking the last-fetched ref"
+  ref="$(git -C "$target" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || echo origin/main)"
   dest="$target/tools/agent-bridge"
   changes=()
 
   for f in "${SCRIPTS[@]}"; do
-    if [ ! -f "$dest/$f" ]; then
+    if ! git -C "$target" cat-file -e "$ref:tools/agent-bridge/$f" 2>/dev/null; then
       changes+=("+$f")
-    elif ! cmp -s "$SRC/$f" "$dest/$f"; then
-      # A mirror that differs AND is newer than canonical was edited in place.
-      # Overwriting would lose that edit, so surface it instead.
-      if [ "$dest/$f" -nt "$SRC/$f" ]; then
-        echo "DIVERGED $target/tools/agent-bridge/$f is NEWER than canonical — not overwriting"
-        echo "         diff: diff $SRC/$f $dest/$f"
-        stale=$((stale + 1))
-        continue
-      fi
+    elif ! git -C "$target" show "$ref:tools/agent-bridge/$f" | cmp -s "$SRC/$f" -; then
       changes+=("~$f")
     fi
   done
 
   if [ ${#changes[@]} -eq 0 ]; then
-    echo "ok       $target"
+    echo "ok       $target  ($ref)"
     continue
   fi
 
   stale=$((stale + 1))
   if [ "$check_only" -eq 1 ]; then
-    echo "STALE    $target  (${changes[*]})"
+    echo "STALE    $target  ($ref: ${changes[*]})"
     continue
   fi
+
+  # Only write into a checkout that is on the default branch with a clean
+  # tools/agent-bridge/. A checkout parked on another branch (or mid-edit here)
+  # belongs to someone else's work: writing into it lands the files on the
+  # wrong branch. Route those through a throwaway worktree off $ref instead.
+  on="$(git -C "$target" branch --show-current)"
+  if [ "$on" != "${ref#origin/}" ] || [ -n "$(git -C "$target" status --porcelain -- tools/agent-bridge)" ]; then
+    echo "PARKED   $target  ($ref: ${changes[*]}) — checkout on '${on:-detached}' or tools/agent-bridge/ dirty; not writing"
+    echo "         copy via a throwaway worktree: git -C $target worktree add --detach <tmp> $ref"
+    continue
+  fi
+
+  # A working-tree copy that differs AND is newer than canonical was edited in
+  # place. Overwriting would lose that edit, so surface it instead.
+  diverged=0
+  for f in "${SCRIPTS[@]}"; do
+    if [ -f "$dest/$f" ] && ! cmp -s "$SRC/$f" "$dest/$f" && [ "$dest/$f" -nt "$SRC/$f" ]; then
+      echo "DIVERGED $dest/$f is NEWER than canonical — not overwriting $target"
+      echo "         diff: diff $SRC/$f $dest/$f"
+      diverged=1
+    fi
+  done
+  [ "$diverged" -eq 1 ] && continue
 
   mkdir -p "$dest"
   for f in "${SCRIPTS[@]}"; do
@@ -80,13 +115,14 @@ for target in "${TARGETS[@]}"; do
   done
   chmod 755 "$dest"/ask-pi "$dest"/ask-claude "$dest"/lane "$dest"/sync \
     "$dest"/dispatch.sh
-  echo "synced   $target  (${changes[*]})"
+  echo "synced   $target  ($ref: ${changes[*]})"
   copied=$((copied + 1))
 done
 
 echo
 if [ "$check_only" -eq 1 ]; then
-  [ "$stale" -eq 0 ] && echo "all mirrors current" || echo "$stale mirror(s) stale — run sync"
+  [ "$stale" -eq 0 ] && echo "all mirrors current" || echo "$stale mirror(s) stale — run sync, then commit and push"
   exit $([ "$stale" -eq 0 ] && echo 0 || echo 1)
 fi
-echo "synced $copied repo(s), $skipped missing. Commit tools/agent-bridge/ in each repo named above."
+echo "synced $copied repo(s), $skipped missing. Commit and push tools/agent-bridge/ in each repo named above;"
+echo "any PARKED repo goes through a throwaway worktree off its origin default branch."

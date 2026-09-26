@@ -145,12 +145,21 @@ if this checkout is lost. Those mirrors are backups, not what executes. After
 changing anything here:
 
 ```sh
-tools/agent-bridge/sync      # push to every mirror, report what changed
+tools/agent-bridge/sync --check   # which mirrors are stale (exit 1 if any)
+tools/agent-bridge/sync           # copy into each stale mirror's working tree
 ```
 
-then commit the mirrors in the repos it names. `sync` refuses to overwrite a
-mirror that has local edits it would lose, so a diverged copy surfaces instead
-of being silently clobbered.
+then commit **and push** the mirrors in the repos it names. A mirror counts as
+current when its **pushed** copy matches: `sync` fetches each repo and compares
+`tools/agent-bridge/` at its origin default branch, not the checkout. So a
+mirror committed but not pushed is still stale, and a checkout parked on
+another session's feature branch doesn't make a pushed mirror look stale.
+`sync` won't write into a stale repo whose checkout is off its default branch
+or has local changes under `tools/agent-bridge/`. It reports `PARKED` instead:
+copy the files in a throwaway worktree off its `origin/main`, commit, and push
+from there. `sync` refuses to overwrite a working-tree copy
+that has local edits it would lose, so a diverged copy surfaces instead of
+being silently clobbered.
 
 ### What `sync` mirrors, and what it doesn't
 
