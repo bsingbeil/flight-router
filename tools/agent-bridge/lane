@@ -5,8 +5,12 @@
 # Run this when you set up a task list; paste the printed block into the other
 # window so both sides know where they are and who owns what.
 #
+#   lane who [path]      # list live Claude sessions + lanes in a tree (read-only)
 #   lane new scraper --owns tools/rugby-shop-scraper
 #   lane new pricing --worktree feat/catalog-pricing --owns vendors/pricing
+#   lane new pair --share-worktree   # deliberate two-writer pairing (task 107)
+#   lane review 154       # = lane new review/154 --owns pr/154 (task 109)
+#   lane reviews 154      # pre-merge check: list claims of pr/154 + STATE
 #   lane ls
 #   lane rm scraper
 #
@@ -21,16 +25,190 @@ common="$(cd "$(git rev-parse --git-common-dir)" && pwd)"
 REG="${common}/lanes.tsv"
 [ -f "$REG" ] || printf 'name\tagent\tsession\tdir\tbranch\towns\tcreated\tclaimed_by\n' > "$REG"
 
+# Live Claude sessions come from session files, one JSON per session, with keys
+# pid, sessionId, cwd, name, status. Tests and callers can point this elsewhere.
+sessions_dir="${LANE_SESSIONS_DIR:-$HOME/.claude/sessions}"
+
 reg_rows() { tail -n +2 "$REG" 2>/dev/null; }
+short_id() { printf '%.8s' "$1"; }
+
+# canon <path> — canonical absolute path (symlinks resolved), so /private/tmp vs
+# /tmp or any symlink cannot make two paths for one tree look different. Falls
+# back to the path unchanged if it can't be cd'd into (does not exist yet).
+canon() { local p; p="$(cd -P "$1" 2>/dev/null && pwd -P)" || { printf '%s' "$1"; return; }; printf '%s' "$p"; }
+
+# tree_of <path> — canonical `git rev-parse --show-toplevel` of <path>; empty
+# when <path> is not inside a git work tree. Never fails (set -e safe).
+tree_of() {
+  local d t
+  d="$(canon "$1")"
+  t="$(git -C "$d" rev-parse --show-toplevel 2>/dev/null)" || t=""
+  [ -n "$t" ] || return 0
+  canon "$t"
+}
+
+is_live() { kill -0 "$1" 2>/dev/null; }
+
+# session_fields <file> — pid\tsessionId\tcwd\tname\tstatus; empty if unparseable.
+session_fields() { jq -r '[.pid//"",.sessionId//"",.cwd//"",.name//"",.status//""]|@tsv' "$1" 2>/dev/null || true; }
+
+# session_by_id <sessionId> — the one session file whose .sessionId matches, as
+# pid\tsessionId\tcwd\tname\tstatus; empty if none. Never fails.
+session_by_id() {
+  local want="$1" f pid sid cwd name status
+  for f in "$sessions_dir"/*.json; do
+    [ -f "$f" ] || continue
+    IFS=$'\t' read -r pid sid cwd name status <<< "$(session_fields "$f")"
+    [ -n "$sid" ] || continue
+    [ "$sid" = "$want" ] || continue
+    printf '%s\t%s\t%s\t%s\t%s\n' "$pid" "$sid" "$cwd" "$name" "$status"
+    return 0
+  done
+  return 0
+}
+
+# claimant_name <sessionId> — the session's name, else "the claiming session".
+claimant_name() {
+  local sid="$1" pid cid cwd name status
+  IFS=$'\t' read -r pid cid cwd name status <<< "$(session_by_id "$sid")"
+  if [ -n "$name" ]; then printf '%s' "$name"; else printf '%s' 'the claiming session'; fi
+}
+
+# claimant_state <claimed_by> <agent> — live | STALE | unknown, the exact
+# resolution `lane ls` prints for a claimant. Never fails.
+claimant_state() {
+  local claimed="$1" agent="$2" pid sid cwd name status
+  if [ -n "$claimed" ]; then
+    IFS=$'\t' read -r pid sid cwd name status <<< "$(session_by_id "$claimed")"
+    if [ -n "$sid" ]; then
+      if [ -n "$pid" ] && is_live "$pid"; then printf 'live'; else printf 'STALE'; fi
+    elif [ "$agent" = "pi" ]; then
+      printf 'unknown'
+    else
+      printf 'STALE'
+    fi
+  else
+    printf 'unknown'
+  fi
+}
+
+# review_only <owns> — true when every owned path is a pr/<n> pseudo-path, i.e.
+# the lane claims a PR review and edits no tree. Such a lane neither needs the
+# one-writer-per-tree gate nor counts as holding the tree it was claimed from.
+review_only() {
+  local o="$1" a
+  [ -n "$o" ] || return 1
+  for a in ${o//,/ }; do
+    case "$a" in pr/*) : ;; *) return 1 ;; esac
+  done
+  return 0
+}
+
+# holder_for <dir> — if another live session holds <dir> (a live Claude session's
+# cwd resolves to that tree, or a lane claims that dir with a live claimant),
+# print "DESC<TAB>NAME" (holder description + the name to SendMessage to). Empty
+# when not held. Never fails.
+holder_for() {
+  local dir="$1" tree me f pid sid cwd name status
+  tree="$(tree_of "$dir")"
+  me="${CLAUDE_CODE_SESSION_ID:-}"
+  if [ -n "$tree" ]; then
+    for f in "$sessions_dir"/*.json; do
+      [ -f "$f" ] || continue
+      IFS=$'\t' read -r pid sid cwd name status <<< "$(session_fields "$f")"
+      [ -n "$pid" ] || continue
+      [ -n "$sid" ] || continue
+      [ "$sid" != "$me" ] || continue
+      is_live "$pid" || continue
+      [ -n "$cwd" ] || continue
+      [ "$(tree_of "$cwd")" = "$tree" ] || continue
+      printf 'session %s [%s] (pid %s)\t%s\n' "$name" "$(short_id "$sid")" "$pid" "$name"
+      return 0
+    done
+  fi
+  local r_name r_agent r_session r_dir r_branch r_owns r_created r_claimed
+  while IFS=$'\t' read -r r_name r_agent r_session r_dir r_branch r_owns r_created r_claimed; do
+    [ -n "$r_name" ] || continue
+    [ -n "$r_claimed" ] || continue
+    [ "$r_claimed" != "$me" ] || continue
+    ! review_only "$r_owns" || continue   # a review claim holds a PR, not a tree (task 109)
+    [ "$(canon "$r_dir")" = "$(canon "$dir")" ] || continue
+    local cpid csid ccwd cname cstatus
+    IFS=$'\t' read -r cpid csid ccwd cname cstatus <<< "$(session_by_id "$r_claimed")"
+    [ -n "$cpid" ] || continue
+    is_live "$cpid" || continue
+    printf 'lane %s (claimed by %s [%s])\t%s\n' "$r_name" "$cname" "$(short_id "$csid")" "$cname"
+    return 0
+  done <<< "$(reg_rows)"
+  return 0
+}
+
+lane_who() {
+  local path="${1:-.}" tree c f pid sid cwd name status you found
+  tree="$(tree_of "$path")"
+  if [ -z "$tree" ]; then
+    echo "lane: no git work tree at '$path'" >&2
+    return 0
+  fi
+  echo "tree: $tree"
+  echo
+  echo "live Claude sessions in this tree:"
+  found=0
+  for f in "$sessions_dir"/*.json; do
+    [ -f "$f" ] || continue
+    IFS=$'\t' read -r pid sid cwd name status <<< "$(session_fields "$f")"
+    [ -n "$pid" ] || continue
+    [ -n "$sid" ] || continue
+    is_live "$pid" || continue
+    [ -n "$cwd" ] || continue
+    c="$(canon "$cwd")"
+    case "$c/" in
+      "$tree"/*) : ;;
+      *) [ "$c" = "$tree" ] || continue ;;
+    esac
+    you=""
+    [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && [ "$sid" = "$CLAUDE_CODE_SESSION_ID" ] && you="  (you)"
+    printf '  %-28s %s  pid %-8s %s%s\n' "$name" "$(short_id "$sid")" "$pid" "$status" "$you"
+    found=1
+  done
+  [ "$found" = 1 ] || echo "  (none)"
+  echo
+  echo "lanes in this tree:"
+  found=0
+  local r_name r_agent r_session r_dir r_branch r_owns r_created r_claimed
+  while IFS=$'\t' read -r r_name r_agent r_session r_dir r_branch r_owns r_created r_claimed; do
+    [ -n "$r_name" ] || continue
+    [ -n "$r_dir" ] || continue
+    [ "$(canon "$r_dir")" = "$tree" ] || continue
+    printf '  %-28s (agent %s, branch %s)\n' "$r_name" "$r_agent" "$r_branch"
+    found=1
+  done <<< "$(reg_rows)"
+  [ "$found" = 1 ] || echo "  (none)"
+  return 0
+}
 
 lane_ls() {
   local rows; rows="$(reg_rows)"
   [ -n "$rows" ] || { echo "no lanes claimed in this repo"; return 0; }
-  printf '%-14s %-7s %-22s %-28s %s\n' NAME AGENT SESSION BRANCH OWNS
+  printf '%-14s %-7s %-26s %-7s %-28s %s\n' NAME AGENT SESSION STATE BRANCH OWNS
   local r_name r_agent r_session r_dir r_branch r_owns r_created r_claimed
   while IFS=$'\t' read -r r_name r_agent r_session r_dir r_branch r_owns r_created r_claimed; do
     [ -n "$r_name" ] || continue
-    printf '%-14s %-7s %-22s %-28s %s\n' "$r_name" "$r_agent" "$r_session" "$r_branch" "${r_owns:-<whole repo>}"
+    local sess state pid sid cwd name status
+    state="$(claimant_state "$r_claimed" "$r_agent")"
+    if [ -n "$r_claimed" ]; then
+      IFS=$'\t' read -r pid sid cwd name status <<< "$(session_by_id "$r_claimed")"
+      if [ -n "$sid" ]; then
+        sess="${name:-<unnamed>} [$(short_id "$sid")]"
+      else
+        # A Pi claimant's id is a Pi/bridge session, never in Claude's session
+        # files — its liveness is not observable here, so say so, not STALE.
+        sess="$(short_id "$r_claimed")"
+      fi
+    else
+      sess="-"
+    fi
+    printf '%-14s %-7s %-26s %-7s %-28s %s\n' "$r_name" "$r_agent" "$sess" "$state" "$r_branch" "${r_owns:-<whole repo>}"
   done <<< "$rows"
 }
 
@@ -62,28 +240,95 @@ check_overlap() {
   [ "$hit" -eq 0 ] || echo "  → pick disjoint paths, or give one of the lanes its own --worktree" >&2
 }
 
+# one review per PR (task 109, CEO 2026-09-24): a lane whose owns includes
+# pr/<n> claims a NUMBER, not a path — and a PR has exactly one reviewer. Refuse
+# (exit 3) any claim whose pr/<n> is already owned by another lane. No override
+# flag, and nothing is auto-removed: a dead or unobservable claimant still holds
+# the claim until it is cancelled explicitly with `lane rm`.
+check_review_claim() {
+  local newname="$1" newowns="$2"
+  local r_name r_agent r_session r_dir r_branch r_owns r_created r_claimed a pr
+  for a in ${newowns//,/ }; do
+    case "$a" in pr/*) : ;; *) continue ;; esac
+    pr="${a#pr/}"
+    while IFS=$'\t' read -r r_name r_agent r_session r_dir r_branch r_owns r_created r_claimed; do
+      [ -n "$r_name" ] || continue
+      [ -n "$r_owns" ] || continue
+      case " ${r_owns//,/ } " in *" pr/$pr "*) : ;; *) continue ;; esac
+      local state pid sid cwd cname cstatus
+      state="$(claimant_state "$r_claimed" "$r_agent")"
+      if [ "$state" = "live" ]; then
+        IFS=$'\t' read -r pid sid cwd cname cstatus <<< "$(session_by_id "$r_claimed")"
+        echo "lane: review of PR $pr is already claimed by ${cname:-<unnamed>} [$(short_id "${sid:-$r_claimed}")] — reviews are 1:1 with a PR (task 109)." >&2
+      else
+        echo "lane: review of PR $pr is already claimed, but the claimant is gone (or its liveness is unknown) — cancel it explicitly with \`lane rm ${r_name}\` first (task 109)." >&2
+      fi
+      return 3
+    done <<< "$(reg_rows)"
+  done
+  return 0
+}
+
 lane_new() {
-  local name="" agent="pi" owns="" wt="" wt_branch=""
+  local name="" agent="" owns="" wt="" wt_branch="" share=0
   while [ $# -gt 0 ]; do
     case "$1" in
-      --owns)     owns="${owns}${owns:+,}$2"; shift 2 ;;
-      --agent)    agent="$2"; shift 2 ;;
-      --worktree) wt=1; case "${2-}" in -*|"") wt_branch="" ;; *) wt_branch="$2"; shift ;; esac; shift ;;
-      -*)         die "unknown flag $1" ;;
-      *)          [ -z "$name" ] && name="$1" || die "unexpected arg $1"; shift ;;
+      --owns)           owns="${owns}${owns:+,}$2"; shift 2 ;;
+      --agent)          agent="$2"; shift 2 ;;
+      --share-worktree) share=1; shift ;;
+      --worktree)       wt=1; case "${2-}" in -*|"") wt_branch="" ;; *) wt_branch="$2"; shift ;; esac; shift ;;
+      -*)               die "unknown flag $1" ;;
+      *)                [ -z "$name" ] && name="$1" || die "unexpected arg $1"; shift ;;
     esac
   done
-  [ -n "$name" ] || die "usage: lane new <name> [--agent pi|claude] [--worktree [branch]] [--owns <path>]..."
+  [ -n "$name" ] || die "usage: lane new <name> [--agent pi|claude] [--worktree [branch]] [--owns <path>]... [--share-worktree]"
+
+  # Agent attribution (task 107): explicit --agent wins; else claude when this
+  # process is inside a Claude session, else pi, else refuse to guess.
+  if [ -z "$agent" ]; then
+    if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then agent="claude"
+    elif [ -n "${PI_SESSION_ID:-}" ]; then agent="pi"
+    else die "usage: lane new requires --agent when neither CLAUDE_CODE_SESSION_ID nor PI_SESSION_ID is set"; fi
+  fi
+
+  # one review per PR (task 109, CEO 2026-09-24): a second claim of pr/<n> is
+  # refused outright — it names the live holder or demands an explicit `lane rm`.
+  check_review_claim "$name" "$owns" || exit 3
+
   grep -q "^${name}$(printf '\t')" "$REG" && die "lane '$name' already exists (lane ls)"
 
-  local root repo dir branch
-  root="$(git rev-parse --show-toplevel)"
+  local root repo dir branch claimed_by
+  root="$(canon "$(git rev-parse --show-toplevel)")"
   repo="$(basename "$(dirname "$common")")"
   [ "$(basename "$common")" = ".git" ] || repo="$(basename "$root")"
 
   if [ -n "$wt" ]; then
     wt_branch="${wt_branch:-lane/${name}}"
     dir="$(dirname "$root")/${repo}-${name}"
+  else
+    dir="$root"
+  fi
+
+  # one-writer-per-tree (task 107, CEO 2026-09-24): refuse to claim a tree held
+  # by another live session, unless --share-worktree says the pairing is
+  # deliberate. Read-only co-tenancy is fine; only the write-claim is gated.
+  claimed_by="${CLAUDE_CODE_SESSION_ID:-${PI_SESSION_ID:-}}"
+  local holder_line="" holder_desc holder_name
+  # A review claim (owns only pr/<n>) edits no tree, so the tree gate does not apply (task 109).
+  review_only "$owns" || holder_line="$(holder_for "$dir")"
+  if [ -n "$holder_line" ]; then
+    IFS=$'\t' read -r holder_desc holder_name <<< "$holder_line"
+    if [ "$share" = 1 ]; then
+      echo "lane: WARNING: ${holder_desc} holds ${dir} — bypassing the one-writer-per-tree rule (task 107, CEO 2026-09-24)." >&2
+      echo "lane: tell them: SendMessage to \"${holder_name}\"" >&2
+    else
+      echo "lane: refusing to claim ${dir}: held by ${holder_desc}." >&2
+      echo "lane: two live windows writing one tree is the task 107 hazard — if this pairing is deliberate, re-run with --share-worktree." >&2
+      exit 3
+    fi
+  fi
+
+  if [ -n "$wt" ]; then
     if [ -d "$dir" ]; then
       echo "reusing existing worktree at $dir"
     elif git show-ref --verify --quiet "refs/heads/${wt_branch}"; then
@@ -93,8 +338,7 @@ lane_new() {
     fi
     branch="$wt_branch"
   else
-    dir="$root"
-    branch="$(git rev-parse --abbrev-ref HEAD)"
+    branch="$(git -C "$dir" rev-parse --abbrev-ref HEAD)"
   fi
 
   echo "checking for collisions with existing lanes…" >&2
@@ -105,19 +349,36 @@ lane_new() {
   # worktree cannot silently share the default thread.
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$name" "$agent" "$name" "$dir" "$branch" "$owns" "$(date +%Y-%m-%d)" \
-    "${CLAUDE_CODE_SESSION_ID:-${PI_SESSION_ID:-}}" >> "$REG"
+    "$claimed_by" >> "$REG"
 
-  local opencmd guard
+  # linked worktree iff the claimed dir's --git-dir differs from --git-common-dir
+  # (resolved and canonical), whatever flag was (or wasn't) passed. A caller who
+  # is ALREADY inside a linked worktree gets "linked worktree" without --worktree.
+  local is_wt=0 gd cgd
+  gd="$(git -C "$dir" rev-parse --git-dir 2>/dev/null)" || gd=""
+  cgd="$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null)" || cgd=""
+  case "$gd" in /*) ;; *) gd="$dir/$gd" ;; esac
+  case "$cgd" in /*) ;; *) cgd="$dir/$cgd" ;; esac
+  [ "$(canon "$gd")" != "$(canon "$cgd")" ] && is_wt=1
+
+  local opencmd reach_label reach_cmd guard worktree_line
   if [ "$agent" = "claude" ]; then
     opencmd="cd ${dir} && claude"
+    reach_label="reach it from another Claude window"
+    reach_cmd="SendMessage to \"$(claimant_name "$claimed_by")\""
   else
     opencmd="cd ${dir} && pi --session-id ${name} -n \"${name}\""
+    reach_label="reach it from Claude Code (separate thread, does not touch the window's session)"
+    reach_cmd="ask-pi -t ${name} \"<message>\""
   fi
-  if [ -n "$wt" ]; then
+  if [ "$is_wt" = 1 ]; then
+    worktree_line="yes — linked worktree"
     guard="own worktree — commit freely on ${branch}"
   elif [ -n "$owns" ]; then
+    worktree_line="no — shared main checkout"
     guard="SHARED checkout — commit ONLY paths under: ${owns}. Never \`git add -A\`."
   else
+    worktree_line="no — shared main checkout"
     guard="SHARED checkout, no owned paths declared — re-run with --owns before editing anything."
   fi
 
@@ -126,7 +387,7 @@ lane_new() {
 ━━━━━━━━━━ LANE: ${name} ━━━━━━━━━━
 directory   ${dir}
 session id  ${name}
-worktree    $([ -n "$wt" ] && echo "yes — dedicated" || echo "no — shared main checkout")
+worktree    ${worktree_line}
 branch      ${branch}
 owns        ${owns:-<not declared>}
 agent       ${agent}
@@ -134,8 +395,8 @@ agent       ${agent}
 open this lane in a new terminal window:
   ${opencmd}
 
-reach it from Claude Code (separate thread, does not touch the window's session):
-  ask-pi -t ${name} "<message>"
+${reach_label}:
+  ${reach_cmd}
 
 rule: ${guard}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -143,10 +404,53 @@ rule: ${guard}
 EOF
 }
 
+# lane review <pr> — sugar for `lane new review/<pr> --owns pr/<pr>` (task 109):
+# a review claims the PR number, not a path — it edits nothing.
+lane_review() {
+  local pr="${1:?usage: lane review <pr>}"
+  [ $# -eq 1 ] || die "usage: lane review <pr>"
+  case "$pr" in *[!0-9]*) die "lane review <pr>: PR must be a number" ;; esac
+  lane_new "review/$pr" --owns "pr/$pr"
+}
+
+# lane reviews <pr> — read-only pre-merge check: list every claim of pr/<n>
+# with its STATE (live | STALE | unknown, same as `lane ls`). Exit 0 when no
+# claim is open, 1 when any claim exists (the PR must not merge).
+lane_reviews() {
+  local pr="${1:?usage: lane reviews <pr>}" found=0
+  [ $# -eq 1 ] || die "usage: lane reviews <pr>"
+  case "$pr" in *[!0-9]*) die "lane reviews <pr>: PR must be a number" ;; esac
+  local r_name r_agent r_session r_dir r_branch r_owns r_created r_claimed
+  while IFS=$'\t' read -r r_name r_agent r_session r_dir r_branch r_owns r_created r_claimed; do
+    [ -n "$r_name" ] || continue
+    [ -n "$r_owns" ] || continue
+    case " ${r_owns//,/ } " in *" pr/$pr "*) : ;; *) continue ;; esac
+    found=1
+    local state sess pid sid cwd name status
+    state="$(claimant_state "$r_claimed" "$r_agent")"
+    if [ -n "$r_claimed" ]; then
+      IFS=$'\t' read -r pid sid cwd name status <<< "$(session_by_id "$r_claimed")"
+      if [ -n "$sid" ]; then sess="${name:-<unnamed>} [$(short_id "$sid")]"; else sess="$(short_id "$r_claimed")"; fi
+    else
+      sess="-"
+    fi
+    printf '%-16s %-7s %s\n' "$r_name" "$state" "$sess"
+  done <<< "$(reg_rows)"
+  if [ "$found" = 1 ]; then
+    echo "lane: review of PR $pr is still claimed — it must report before the PR merges (task 109)." >&2
+    return 1
+  fi
+  echo "no review claimed for PR $pr"
+  return 0
+}
+
 case "${1-}" in
-  new)   shift; lane_new "$@" ;;
-  ls|"") lane_ls ;;
-  rm)    shift; lane_rm "$@" ;;
-  -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//' ;;
-  *)     die "unknown command '${1}' (new | ls | rm)" ;;
+  new)     shift; lane_new "$@" ;;
+  review)  shift; lane_review "$@" ;;
+  reviews) shift; lane_reviews "$@" ;;
+  who)     shift; lane_who "$@" ;;
+  ls|"")   lane_ls ;;
+  rm)      shift; lane_rm "$@" ;;
+  -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *)     die "unknown command '${1}' (new | review | reviews | who | ls | rm)" ;;
 esac
