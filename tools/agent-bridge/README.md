@@ -154,8 +154,9 @@ current when its **pushed** copy matches: `sync` fetches each repo and compares
 `tools/agent-bridge/` at its origin default branch, not the checkout. So a
 mirror committed but not pushed is still stale, and a checkout parked on
 another session's feature branch doesn't make a pushed mirror look stale.
-`sync` won't write into a stale repo whose checkout is off its default branch
-or has local changes under `tools/agent-bridge/`. It reports `PARKED` instead:
+`sync` won't write into a stale repo whose checkout is off its default branch,
+isn't exactly at its `origin` tip, or has local changes under
+`tools/agent-bridge/`. It reports `PARKED` instead:
 copy the files in a throwaway worktree off its `origin/main`, commit, and push
 from there. `sync` refuses to overwrite a working-tree copy
 that has local edits it would lose, so a diverged copy surfaces instead of

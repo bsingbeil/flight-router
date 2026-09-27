@@ -12,8 +12,9 @@
 # nothing about whether the mirror exists.
 #
 #   sync            copy into each STALE mirror's working tree, report what changed
-#                   (PARKED, not written: checkout off the default branch or
-#                   tools/agent-bridge/ dirty — use a throwaway worktree)
+#                   (PARKED, not written: checkout off the default branch, not
+#                   at its origin tip, or tools/agent-bridge/ dirty — use a
+#                   throwaway worktree)
 #   sync --check    report only, change nothing (exit 1 if anything is stale)
 #
 # SYNC_TARGETS (space-separated paths) replaces the target list — for tests.
@@ -85,13 +86,17 @@ for target in "${TARGETS[@]}"; do
     continue
   fi
 
-  # Only write into a checkout that is on the default branch with a clean
-  # tools/agent-bridge/. A checkout parked on another branch (or mid-edit here)
-  # belongs to someone else's work: writing into it lands the files on the
-  # wrong branch. Route those through a throwaway worktree off $ref instead.
-  on="$(git -C "$target" branch --show-current)"
-  if [ "$on" != "${ref#origin/}" ] || [ -n "$(git -C "$target" status --porcelain -- tools/agent-bridge)" ]; then
-    echo "PARKED   $target  ($ref: ${changes[*]}) — checkout on '${on:-detached}' or tools/agent-bridge/ dirty; not writing"
+  # Only write into a checkout that is on the default branch, exactly at its
+  # origin tip, with a clean tools/agent-bridge/. A checkout parked on another
+  # branch (or mid-edit here) belongs to someone else's work: writing into it
+  # lands the files on the wrong branch. One behind or ahead of origin would
+  # commit on top of a base other than the pushed copy this judged. Route
+  # those through a throwaway worktree off $ref instead.
+  checked_out="$(git -C "$target" branch --show-current)"
+  if [ "$checked_out" != "${ref#origin/}" ] \
+     || [ "$(git -C "$target" rev-parse HEAD)" != "$(git -C "$target" rev-parse "$ref")" ] \
+     || [ -n "$(git -C "$target" status --porcelain -- tools/agent-bridge)" ]; then
+    echo "PARKED   $target  ($ref: ${changes[*]}) — checkout on '${checked_out:-detached}', not at $ref, or tools/agent-bridge/ dirty; not writing"
     echo "         copy via a throwaway worktree: git -C $target worktree add --detach <tmp> $ref"
     continue
   fi
