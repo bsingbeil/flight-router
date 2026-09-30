@@ -1,0 +1,380 @@
+#!/usr/bin/env bash
+# lane-guard — Claude Code hook: the per-write half of task 107's CEO
+# decision that task 107 itself left undone. `lane new` only guards the
+# CLAIM; nothing stopped a session that never claimed anything from simply
+# editing a tree another live session holds. This is that stop.
+#
+#   lane-guard pre       # PreToolUse, matcher Edit|Write|MultiEdit|NotebookEdit|Bash
+#   lane-guard notices    # UserPromptSubmit and PostToolUse
+#
+# Registered in .claude/settings.json (project scope — Brendan's ruling on
+# task 154, 2026-09-28: a hook that runs on every edit proves itself where a
+# bug only affects one repo; it can move to user scope later).
+#
+# FAIL OPEN. Any internal error here — jq missing, an unreadable registry, a
+# hook JSON that won't parse, a corrupt session file — allows the write and
+# prints one stderr line. A hook that fails CLOSED blocks every edit in
+# every session; that is a worse hazard than the one this guards against.
+# There is deliberately no `set -e`: a failing command here must fall
+# through to an explicit allow, never abort mid-decision.
+set -uo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Shared session/tree/registry primitives — the same lib `lane` sources, so
+# "who is live" and "what tree is this" can never drift into two answers.
+source "${script_dir}/lib/lane-core.sh"
+
+sessions_dir="${LANE_SESSIONS_DIR:-$HOME/.claude/sessions}"
+
+# bash_write_ish <command> — heuristic: does this Bash command look like it
+# writes to disk? Deliberately imprecise in both directions (a `>` inside a
+# quoted grep pattern is a false positive; a write hidden behind a wrapper
+# script is a false negative) — this gates a hook that must stay fast and
+# fail open, not a security boundary. A command that doesn't match is never
+# refused, so a false negative here is silent; a false positive just costs
+# one extra holder check, which is cheap.
+bash_write_ish() {
+  local c=" $1 "
+  case "$c" in
+    *'>'*|*' tee '*|*'sed'*'-i'*|*'perl'*'-i'*|*' mv '*|*' cp '*|*' rm '*|*' mkdir '*|*' touch '*|*' chmod '*|*' ln '*)
+      return 0 ;;
+  esac
+  case "$c" in
+    *' git add'*|*' git commit'*|*' git checkout'*|*' git switch'*|*' git reset'*|*' git restore'*| \
+    *' git merge'*|*' git rebase'*|*' git cherry-pick'*|*' git revert'*|*' git stash'*|*' git apply'*| \
+    *' git am'*|*' git pull'*|*' git clean'*|*' git rm'*|*' git mv'*)
+      return 0 ;;
+  esac
+  return 1
+}
+
+# lane_guard_load_sessions — pid\tsessionId\tcwd\tname\tstatus\tstartedAt per
+# parseable file in $sessions_dir. Tries ONE batched `jq -s` call across
+# every file (one fork, not one per file — the latency budget in task 154's
+# design note 5) and falls back to a per-file loop, skipping whatever jq
+# can't parse, only if the batch call fails outright (one corrupt file
+# poisons a slurp of everything). The fallback is also the fail-open path
+# for a corrupt session file: a file that can't be read just isn't in the
+# result, which is what "fail open" wants (a holder we can't see can't
+# block a write).
+lane_guard_load_sessions() {
+  local out=""
+  shopt -s nullglob
+  local files=("$sessions_dir"/*.json)
+  shopt -u nullglob
+  [ "${#files[@]}" -gt 0 ] || return 0
+  out="$(jq -rs '.[] | [(.pid//""),(.sessionId//""),(.cwd//""),(.name//""),(.status//""),(.startedAt//"")]|@tsv' "${files[@]}" 2>/dev/null)"
+  if [ $? -eq 0 ] && [ -n "$out" ]; then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  local f row
+  for f in "${files[@]}"; do
+    row="$(jq -r '[(.pid//""),(.sessionId//""),(.cwd//""),(.name//""),(.status//""),(.startedAt//"")]|@tsv' "$f" 2>/dev/null)" || continue
+    [ -n "$row" ] && printf '%s\n' "$row"
+  done
+  return 0
+}
+
+# in_tree_sessions <tree> — the rows of $sessions_tsv whose cwd is <tree> or
+# inside it, by raw string-prefix match (the `"$cwd/"` in `"$tree"/*` idiom
+# that `lane who` uses, so a sibling like /repo2 is not counted as inside
+# /repo). No canon(): Claude Code records session cwd as getcwd(3), i.e. the
+# already-symlink-resolved physical path, so the two strings are already in the
+# same canonical form. One pass over $sessions_tsv, no git forks — this is the
+# task 154 latency fix (the tiebreak used to re-run `tree_of` — a git fork —
+# per session per function, ~1.5 s over ~31 sessions).
+in_tree_sessions() {
+  local tree="$1"
+  local s_pid s_sid s_cwd s_name s_status s_started
+  while IFS=$'\t' read -r s_pid s_sid s_cwd s_name s_status s_started; do
+    [ -n "$s_pid" ] || continue
+    [ -n "$s_sid" ] || continue
+    [ -n "$s_cwd" ] || continue
+    case "$s_cwd/" in
+      "$tree"/*) : ;;
+      *) [ "$s_cwd" = "$tree" ] || continue ;;
+    esac
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$s_pid" "$s_sid" "$s_cwd" "$s_name" "$s_status" "$s_started"
+  done <<< "$sessions_tsv"
+}
+
+# claimant_info <sessionId> — "pid<TAB>name" for a session id, from the
+# already-loaded $sessions_tsv, one awk pass. Empty if unknown.
+claimant_info() { printf '%s\n' "$sessions_tsv" | awk -F'\t' -v want="$1" '$2==want{print $1 "\t" $4; exit}'; }
+
+# claims_on_tree <tree> — the live, non-review lane claims on <tree>, as
+# name<TAB>claimed_by<TAB>claimant_name<TAB>claimant_short. Computed ONCE per
+# invocation (cmd_pre stores it in $tree_claims): the tiebreak and the refusal
+# message all read this instead of re-scanning the registry and re-resolving
+# each claimant's liveness (which was the second latency sink after the
+# per-session tree_of — a real registry has ~15 rows).
+claims_on_tree() {
+  local tree="$1"
+  local r_name r_agent r_session r_dir r_branch r_owns r_created r_claimed
+  while IFS=$'\t' read -r r_name r_agent r_session r_dir r_branch r_owns r_created r_claimed; do
+    [ -n "$r_name" ] || continue
+    [ -n "$r_claimed" ] || continue
+    review_only "$r_owns" && continue
+    # Raw string compare, no canon(): `lane new` stores a canonical dir
+    # (canon of --show-toplevel, or dirname of it + a literal name), so the
+    # registry value is already in the same form as $tree (from `git
+    # rev-parse --show-toplevel`).
+    [ "$r_dir" = "$tree" ] || continue
+    local info pid cname
+    info="$(claimant_info "$r_claimed")"
+    pid="${info%%$'\t'*}"; cname="${info#*$'\t'}"
+    [ -n "$pid" ] || continue
+    is_live "$pid" || continue
+    printf '%s\t%s\t%s\t%s\n' "$r_name" "$r_claimed" "${cname:-?}" "$(short_id "$r_claimed")"
+  done <<< "$(reg_rows)"
+}
+
+# has_live_claim_by <sessionId> — a live, non-review lane claim on this tree
+# whose claimed_by is exactly <sessionId>. Reads the precomputed $tree_claims.
+# This is rule (a) of the tiebreak, and it is also what makes a
+# --share-worktree pairing work on BOTH sides: each side's OWN claim satisfies
+# this independently, so neither needs to be "the" single holder.
+has_live_claim_by() {
+  local id="$1"
+  local c_name c_claimed c_cname c_cshort
+  while IFS=$'\t' read -r c_name c_claimed c_cname c_cshort; do
+    [ -n "$c_name" ] || continue
+    [ "$c_claimed" = "$id" ] && return 0
+  done <<< "$tree_claims"
+  return 1
+}
+
+# any_live_claim_on_tree — true if ANY live, non-review lane claims this tree,
+# regardless of who. Rule (b) only applies with no claim at all.
+any_live_claim_on_tree() { [ -n "$tree_claims" ]; }
+
+# earliest_started_session_in_tree — the sessionId of the live session in
+# $tree_sessions (already filtered to this tree by cmd_pre) with the smallest
+# startedAt, among those that HAVE one. A session file with no startedAt counts
+# as latest-started (task 154, clarification 1) — it can never win this. When
+# NOTHING in the tree has startedAt this prints empty: the tiebreak has no
+# winner, which is_holder treats as "nobody is refused" (fail open, not mutual
+# refusal).
+earliest_started_session_in_tree() {
+  local best_sid="" best_started=""
+  local s_pid s_sid s_cwd s_name s_status s_started
+  while IFS=$'\t' read -r s_pid s_sid s_cwd s_name s_status s_started; do
+    [ -n "$s_pid" ] || continue
+    [ -n "$s_sid" ] || continue
+    is_live "$s_pid" || continue
+    [ -n "$s_started" ] || continue
+    if [ -z "$best_started" ] || { [ "$s_started" -lt "$best_started" ] 2>/dev/null; }; then
+      best_sid="$s_sid"; best_started="$s_started"
+    fi
+  done <<< "$tree_sessions"
+  printf '%s' "$best_sid"
+}
+
+# is_holder <sessionId> — the task 154 tiebreak: (a) a live claim by
+# <sessionId> makes it a holder outright; (b) otherwise, ONLY if no live
+# claim exists on this tree at all, the earliest-started live session there is
+# the holder.
+is_holder() {
+  local id="$1"
+  has_live_claim_by "$id" && return 0
+  any_live_claim_on_tree && return 1
+  local earliest; earliest="$(earliest_started_session_in_tree)"
+  # No startedAt anywhere in the tree → the earliest-started tiebreak has no
+  # winner, so nobody is refused on that basis (task 154 fix: fail open — an
+  # empty tiebreak must allow, never refuse every session at once).
+  [ -z "$earliest" ] && return 0
+  [ "$id" = "$earliest" ]
+}
+
+# other_present <sessionId> — true if some session OTHER than <sessionId> is
+# live in this tree (by cwd) or holds a live claim on it. The third way to be
+# allowed to write is that nobody else is around at all.
+other_present() {
+  local me="$1"
+  local s_pid s_sid s_cwd s_name s_status s_started
+  while IFS=$'\t' read -r s_pid s_sid s_cwd s_name s_status s_started; do
+    [ -n "$s_pid" ] || continue
+    [ -n "$s_sid" ] || continue
+    [ "$s_sid" != "$me" ] || continue
+    is_live "$s_pid" || continue
+    return 0
+  done <<< "$tree_sessions"
+  local c_name c_claimed c_cname c_cshort
+  while IFS=$'\t' read -r c_name c_claimed c_cname c_cshort; do
+    [ -n "$c_name" ] || continue
+    [ "$c_claimed" != "$me" ] || continue
+    return 0
+  done <<< "$tree_claims"
+  return 1
+}
+
+# find_named_holder — for the refusal MESSAGE only (the allow/refuse decision
+# above never calls this): the first live, non-review lane claim on this tree,
+# else the earliest-started live session there. Prints
+# "DESC<TAB>NAME<TAB>SID", empty if neither exists. Never fails.
+find_named_holder() {
+  local c_name c_claimed c_cname c_cshort
+  IFS=$'\t' read -r c_name c_claimed c_cname c_cshort <<< "$tree_claims"
+  if [ -n "$c_name" ]; then
+    printf 'lane %s (claimed by %s [%s])\t%s\t%s\n' "$c_name" "${c_cname:-?}" "$c_cshort" "${c_cname:-?}" "$c_claimed"
+    return 0
+  fi
+
+  local best_sid info best_name
+  best_sid="$(earliest_started_session_in_tree)"
+  [ -n "$best_sid" ] || return 0
+  info="$(claimant_info "$best_sid")"
+  best_name="${info#*$'\t'}"
+  printf 'session %s [%s]\t%s\t%s\n' "${best_name:-?}" "$(short_id "$best_sid")" "${best_name:-?}" "$best_sid"
+}
+
+# lane_guard_cleanup_notices — opportunistic (task 154, design note 2): a
+# lane-notices/<sid> queue file and its <sid>.seen dedupe file are deleted
+# once <sid> has no live session at all. Best effort, never fails, never
+# affects this call's own allow/refuse decision.
+lane_guard_cleanup_notices() {
+  local dir
+  dir="$(lane_notices_dir 2>/dev/null)" || return 0
+  [ -d "$dir" ] || return 0
+  local f base sid pid
+  for f in "$dir"/*; do
+    [ -f "$f" ] || continue
+    base="$(basename "$f")"
+    sid="${base%.seen}"
+    pid="$(claimant_info "$sid")"; pid="${pid%%$'\t'*}"
+    if [ -z "$pid" ] || ! is_live "$pid"; then
+      rm -f "${dir}/${sid}" "${dir}/${sid}.seen" 2>/dev/null
+    fi
+  done
+  return 0
+}
+
+cmd_pre() {
+  local payload
+  payload="$(cat)"
+  if [ -z "$payload" ]; then
+    echo "lane-guard: empty hook input — allowing (fail open)." >&2
+    exit 0
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "lane-guard: jq not found — allowing (fail open)." >&2
+    exit 0
+  fi
+
+  local session_id cwd tool_name file_path notebook_path command
+  # One jq call for the single-line fields, joined on \x1f (a separator paths
+  # and commands never contain) so empty fields survive `read` — a tab
+  # delimiter would collapse the empty file_path/notebook_path fields.
+  IFS=$'\x1f' read -r session_id cwd tool_name file_path notebook_path <<< "$(printf '%s' "$payload" | jq -r '[.session_id//"",.cwd//"",.tool_name//"",.tool_input.file_path//"",.tool_input.notebook_path//""]|join("\u001f")' 2>/dev/null)"
+  # `command` is pulled separately: it is the one field that can carry embedded
+  # newlines, and `read` stops at the first \n — joining it into the single-line
+  # read silently truncated a multi-line Bash command before bash_write_ish ever
+  # saw the write on line 2 (task 154 fix: the exact write the guard exists to
+  # block slipped through).
+  command="$(printf '%s' "$payload" | jq -r '.tool_input.command // ""' 2>/dev/null)"
+  if [ -z "$session_id" ]; then
+    echo "lane-guard: hook input had no session_id — allowing (fail open)." >&2
+    exit 0
+  fi
+
+  # Target tree: the git tree of dirname(file_path or notebook_path); for
+  # Bash, of cwd, and only for a command that looks like a write.
+  local dir=""
+  case "$tool_name" in
+    Edit|Write|MultiEdit)
+      [ -n "$file_path" ] && dir="$(dirname "$file_path")"
+      ;;
+    NotebookEdit)
+      [ -n "$notebook_path" ] && dir="$(dirname "$notebook_path")"
+      ;;
+    Bash)
+      bash_write_ish "$command" || exit 0   # read-only Bash is never refused
+      dir="$cwd"
+      ;;
+    *)
+      exit 0 ;;   # a tool this guard doesn't watch
+  esac
+  [ -n "$dir" ] || exit 0
+
+  local d out tree common REG sessions_tsv tree_sessions tree_claims
+  d="$(canon "$dir")"
+  # One git call for both the tree root and the shared git dir (the hook runs
+  # on every edit; two `rev-parse` forks were ~20 ms of the latency budget).
+  out="$(git -C "$d" rev-parse --show-toplevel --git-common-dir 2>/dev/null)" || out=""
+  tree="${out%%$'\n'*}"
+  [ -n "$tree" ] || exit 0   # not inside a git work tree — allow
+  common="${out#*$'\n'}"
+  # --git-common-dir is relative (".git") in a main checkout; resolve against
+  # the tree, then canonicalise (the main checkout's .git is not a symlink, but
+  # a linked worktree's common dir path can be).
+  case "$common" in /*) ;; *) common="$tree/$common" ;; esac
+  common="$(canon "$common")"
+  REG=""
+  [ -f "${common}/lanes.tsv" ] && REG="${common}/lanes.tsv"
+  sessions_tsv="$(lane_guard_load_sessions)"
+  tree_sessions="$(in_tree_sessions "$tree")"
+  tree_claims="$(claims_on_tree "$tree")"
+
+  lane_guard_cleanup_notices
+
+  if is_holder "$session_id" \
+     || ! other_present "$session_id"; then
+    exit 0
+  fi
+
+  # Refused. Name a holder for the message, and tell them — once per
+  # (cotenant, tree) — that someone just tried to write here.
+  local holder_line holder_desc holder_name holder_sid
+  holder_line="$(find_named_holder)"
+  IFS=$'\t' read -r holder_desc holder_name holder_sid <<< "$holder_line"
+  [ -n "$holder_desc" ] || holder_desc="another live session in this tree"
+
+  local info cname cshort
+  info="$(claimant_info "$session_id")"
+  cname="${info#*$'\t'}"
+  cshort="$(short_id "$session_id")"
+  if [ -n "$holder_sid" ]; then
+    lane_notify_holder "$holder_sid" "tried to write in" "${cname:-the writing session}" "$cshort" "$tree"
+  fi
+
+  {
+    echo "lane-guard: refusing this write — ${tree} is held by ${holder_desc}."
+    echo "lane-guard: two ways out — \`lane new <name> --share-worktree\` for a deliberate pairing, or SendMessage to \"${holder_name:-the holder}\"."
+  } >&2
+  exit 2
+}
+
+cmd_notices() {
+  local payload
+  payload="$(cat)"
+  [ -n "$payload" ] || exit 0
+  command -v jq >/dev/null 2>&1 || exit 0
+
+  local session_id event
+  session_id="$(printf '%s' "$payload" | jq -r '.session_id // empty' 2>/dev/null)"
+  [ -n "$session_id" ] || exit 0
+  event="$(printf '%s' "$payload" | jq -r '.hook_event_name // empty' 2>/dev/null)"
+  [ -n "$event" ] || event="PostToolUse"
+
+  local dir
+  dir="$(lane_notices_dir 2>/dev/null)" || exit 0
+  local file="${dir}/${session_id}"
+  [ -s "$file" ] || exit 0
+
+  local body
+  body="$(cat "$file" 2>/dev/null)"
+  [ -n "$body" ] || exit 0
+
+  rm -f "$file" 2>/dev/null   # delivered — remove the lines this call takes
+
+  jq -n --arg event "$event" --arg ctx "$body" \
+    '{hookSpecificOutput:{hookEventName:$event, additionalContext:$ctx}}' 2>/dev/null
+  exit 0
+}
+
+case "${1-}" in
+  pre)     shift; cmd_pre "$@" ;;
+  notices) shift; cmd_notices "$@" ;;
+  *)       echo "lane-guard: unknown mode '${1-}' (pre|notices) — allowing (fail open)." >&2; exit 0 ;;
+esac

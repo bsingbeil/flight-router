@@ -8,6 +8,8 @@ relaying messages between them.
 | `ask-pi "<msg>"` | Claude Code → Pi. Pi's reply prints on stdout, straight into the caller's context. |
 | `ask-claude "<msg>"` | Pi → Claude Code. Claude answers with read-only tools — it reviews, Pi edits. |
 | `lane new <name> --owns <path>` · `lane who [path]` | Claims a session id + owned paths (optionally its own worktree) and prints a paste-ready coordinates block for a second terminal window. **Refuses a tree another live Claude session holds** (task 107, see below); `lane who` shows who is in a tree. |
+| `merge-pr.sh <pr>` | **The merge path (task 156).** Runs `lane reviews <pr>` first and refuses to call `gh pr merge --merge` while any review claim on the PR is open. The orchestrator and the COO merge through this, never a raw `gh pr merge`. |
+| `lane-guard pre` · `lane-guard notices` | The Claude Code hook (`.claude/settings.json`, project scope): `pre` refuses a write in a tree another live session holds (task 154, see below); `notices` delivers the holding session its co-tenant notices. |
 | `dispatch.sh --lane <name> --task <id> [--series <s>] [--eta <min>] [--force] [--force-shared-checkout] "<msg>"` | Backgrounds an `ask-pi` call and leaves a JSON status record under `.claude/dispatch/` for polling instead of blocking. **Enforces ADR 0086's two concurrency rules before it launches anything** — see below. |
 | `orchestrator-count.sh [--quiet]` | The only scheduled counter: counts unfiled done-tasks, overdue dispatch records, stale PRs, and (task 079) any loaded `com.navigate*`/`com.navigateops.*` launchd job sitting at a non-zero, non-`-` exit status. Own exit codes: `0` nothing crossed, `2` something crossed AND every escalation of it landed in `PENDING/`, `1` a crossing's escalation FAILED to land (or the script couldn't establish its own bearings), `64` bad usage — `2` is reserved for "found something and told someone", never conflated with a real failure. Run under `run-job.sh`, which maps that `2` to a clean launchd status; see its header for the full contract. |
 | `<report-lines> \| escalate-crossing.sh <kind>` | The "tell someone" half of the counter: turns a crossing into one file per finding kind in `workspaces/coo/decisions/PENDING/`, landed on `main` through a throwaway worktree. Re-runs update that file rather than piling up duplicates. Called by `orchestrator-count.sh`, not by hand. |
@@ -18,17 +20,21 @@ relaying messages between them.
 
 `dispatch.sh`, `orchestrator-count.sh`, `escalate-crossing.sh`, and
 `check-task-filed.sh` carry a `.sh` extension and are invoked by path, unlike `ask-pi` / `ask-claude` / `lane` /
-`sync` above, which are extensionless commands symlinked into `~/bin`. That's
+`sync` above, which are extensionless commands symlinked into `~/bin`. `lane-guard` is extensionless like those,
+but is **not** symlinked into `~/bin` either: it is a Claude Code hook, invoked by path from
+`.claude/settings.json` (`"$CLAUDE_PROJECT_DIR"/tools/agent-bridge/lane-guard pre`), so every worktree runs its
+own checkout's copy. That's
 the whole distinction — the `.sh` scripts are in-repo gates and helpers, not
 standalone commands, so they were never symlinked out. **`ask-rawls` is the one
 exception**: extensionless like a command, but deliberately *not* symlinked into
 `~/bin` — putting Rawls on every agent's command path would widen the reach its
 executor refusal exists to narrow, so the Dispatcher runs it by its repo path.
-`lib/frontmatter.sh`, `lib/portable-date.sh`, and `lib/repo-root.sh` are shared
-helpers sourced by the `.sh` scripts (and, for `repo-root.sh`, by `dispatch.sh`
+`lib/frontmatter.sh`, `lib/lane-core.sh`, `lib/portable-date.sh`, and `lib/repo-root.sh` are shared
+helpers sourced by the `.sh` scripts and the extensionless commands (and, for `repo-root.sh`, by `dispatch.sh`
 too — it resolves the one shared main-checkout directory regardless of which
 worktree a script runs from, the same way `lane` resolves `lanes.tsv`'s
-location). `lib/land-on-main.sh` is the one write path to `main`'s tree — the
+location). `lib/lane-core.sh` is the one `lane` and `lane-guard` both source, so
+"who is live" and "what tree is this" can never drift into two answers. `lib/land-on-main.sh` is the one write path to `main`'s tree — the
 throwaway-worktree drain `escalate-crossing.sh` and `ask-rawls` both use, so it
 exists once. `lib/pending-writer.sh` (task 121) is the one PENDING-file writer (`write_one` +
 `pending_frontmatter`: one open file per kind, a re-run keeps `created:` and bumps `last-seen:`),
@@ -86,18 +92,21 @@ for the rule whose failure mode is two agents writing one checkout.
 Covered by `tests/dispatch.test.sh` (stubbed `ask-pi`, real git worktrees, no Pi
 call).
 
-## What `lane` refuses, and why — one writer per tree (task 107)
+## What `lane` refuses, and why — one writer per tree (tasks 107 + 154)
 
 The Claude-side twin of `dispatch.sh`'s exit 3 above. **`lane new` refuses (exit 3) to claim a
-directory held by ANOTHER live Claude session.** A tree is "held" when (a) another live Claude
-session's `cwd` resolves to that tree, or (b) an existing lane records that `dir` and its
-`claimed_by` session is still live. Live-session source: `~/.claude/sessions/*.json` (`pid`,
-`sessionId`, `cwd`, `name`, `status`); a session is live if its `pid` is. CEO decision 2026-09-24:
+directory held by ANOTHER live Claude session**, and now **`lane-guard pre` refuses the write
+itself**, so a session that never claims anything is stopped at the edit, not just visible to
+`lane who`. A tree is "held" when (a) another live Claude session's `cwd` resolves to that tree,
+or (b) an existing lane records that `dir` and its `claimed_by` session is still live.
+Live-session source: `~/.claude/sessions/*.json` (`pid`, `sessionId`, `cwd`, `name`, `status`,
+`startedAt`); a session is live if its `pid` is. CEO decision 2026-09-24:
 
 | Access | Rule | Override |
 |---|---|---|
 | Read-only co-tenancy | Allowed, as long as both sessions know. `lane who [path]` lists every live session and every lane in a tree (read-only, exit 0). | — |
 | Claiming the tree to write | Refused (exit 3), naming the holder. | `--share-worktree` — its own named flag, not `--force`. Prints a loud warning naming the rule bypassed and tells you to `SendMessage` the holder. |
+| **Writing in a held tree** | Refused (exit 2) by the `lane-guard pre` hook on every `Edit`/`Write`/`MultiEdit`/`NotebookEdit` and write-looking `Bash` command. | Hold a lane claim on the tree (each side's own `--share-worktree` claim lets both write), or be the holder, or be the only live session there. |
 
 - `lane ls` resolves each lane's holder at print time: `SESSION` is the claiming session's name +
   short id, `STATE` is `live | STALE | unknown`. `unknown` means the claimant's liveness is not
@@ -107,13 +116,34 @@ session's `cwd` resolves to that tree, or (b) an existing lane records that `dir
   passed, and attributes the agent from the environment (`claude` if `CLAUDE_CODE_SESSION_ID`,
   else `pi` if `PI_SESSION_ID`, else `--agent` is required). A claude lane's "reach it" line is
   `SendMessage to "<name>"`, never `ask-pi`.
+- **`--worktree` always lands in the same place (task 200).** `lane new <name> --worktree`
+  creates/uses `<main-parent>/<repo>-<name>` — next to the MAIN checkout that holds the shared
+  `git-common-dir` — whether it ran from the main checkout or from inside another worktree. Run
+  from a nested worktree (`.claude/worktrees/foo`), it no longer nests the new one under that
+  worktree. A caller reads the path from the printed `directory` line instead of predicting it.
 - **Sessions are filed by working directory, and it follows `EnterWorktree`.** A session that moved
   into a worktree is recorded under that worktree, not the main checkout, so `lane who` on the main
   checkout will not list it. They are separate trees with separate writers, which is correct.
-- **The limit.** This guards the CLAIM (`lane new`), not every file write: a session that starts
-  editing without claiming is not stopped, only visible to `lane who`. The per-write guard and the
-  push notice to the holding session are task 154. Tests: `tests/lane.test.sh` (stubbed session
-  files, real linked worktree, nothing real touched).
+- **Who holds a tree when there is no claim (task 154).** `lane-guard pre` resolves the holder as
+  (a) a live, non-review lane claim on the tree — its claimant holds it; (b) with no such claim,
+  the **earliest `startedAt`** live Claude session whose `cwd` is in the tree. A session file with
+  no `startedAt` counts as latest-started (never the earliest holder); if none in the tree has
+  one, there is no `startedAt` holder and the write is allowed. The tiebreak is what makes two
+  co-tenant sessions non-symmetric: exactly one of them is the holder.
+- **Fail open.** Any internal error in the hook — missing `jq`, an unreadable registry, a hook
+  JSON that won't parse, a corrupt session file — allows the write and prints one stderr line.
+  A hook that failed closed would block every edit in every session; that is the worse hazard.
+- **The holder is told, once per co-tenant (task 154).** On a refusal (and on a
+  `lane new --share-worktree` bypass) the hook appends one line to
+  `<git-common-dir>/lane-notices/<holder-sessionId>`. The holding session's own
+  `lane-guard notices` hook (UserPromptSubmit + PostToolUse) prints its queue as context and
+  removes the lines it delivered. Dedupe keys live in
+  `<git-common-dir>/lane-notices/<holder>.seen` (one per co-tenant + tree), so the holder hears
+  about a pairing once, not on every write; the `.seen` key survives delivery.
+  `lane-guard pre` opportunistically deletes a notice and its `.seen` whose holder session is no
+  longer live. The holder is not woken while idle — it sees the notice on its next prompt or tool
+  call. Tests: `tests/lane.test.sh` and `tests/lane-guard.test.sh` (stubbed session files, real
+  linked worktree, nothing real touched).
 
 ## What `lane` refuses, and why — one review per PR (task 109)
 
@@ -133,6 +163,13 @@ any claim exists. Run it before merging — a PR does not merge on the first GRE
 must report. **A review is outstanding until it reports, or until its claim is explicitly
 cancelled** (`lane rm review/<n>`); a session that went away still counts as outstanding until the
 claim is removed.
+
+The check-then-append inside `lane new` is protected by a per-`pr/<n>` `mkdir` lock in the shared
+git dir (the same shape `ask-pi` uses for its thread lock, task 156), so two same-instant claims
+of one PR cannot both pass the refusal. **`merge-pr.sh <pr>` is the way to merge**: it runs
+`lane reviews <pr>` and refuses `gh pr merge --merge` while any claim is open, so no one has to
+remember to run the check by hand. A hard-blocking `gh` alias or git hook would close the raw
+`gh pr merge` loophole too, but that needs Brendan's go and is not yet decided.
 
 ## This directory is the canonical copy
 
@@ -164,9 +201,11 @@ being silently clobbered.
 
 ### What `sync` mirrors, and what it doesn't
 
-`sync` copies `ask-pi`, `ask-claude`, `lane`, `sync` itself, `dispatch.sh`, and
-`lib/` — generic bridge tooling with no navigate-ops-specific assumptions
-baked in, safe to run against any repo's own `tasks/`.
+`sync` copies `ask-pi`, `ask-claude`, `lane`, `lane-guard`, `sync` itself,
+`dispatch.sh`, and the `lib/` helpers those source (`lane-core.sh`,
+`frontmatter.sh`, `portable-date.sh`, `repo-root.sh`) — generic bridge tooling
+with no navigate-ops-specific assumptions baked in, safe to run against any
+repo's own `tasks/`.
 
 `orchestrator-count.sh`, `check-task-filed.sh`, `health-check.sh`,
 `health-baseline.txt`, and `launchd/` are deliberately **not** mirrored. All of
@@ -202,7 +241,7 @@ Repo-level usage and the lane rules are documented in [`tasks/README.md`](../../
 
 ## Requirements
 
-`pi` and `claude` on `PATH`. Pi defaults to `deepseek-v4-pro`; the Claude side
+`pi` and `claude` on `PATH`. Pi defaults to `deepseek-flash` (V4.1 Flash, since 2026-09-30; task 196); the Claude side
 defaults to `claude-sonnet-5` with a $0.50-per-call budget cap
 (`CLAUDE_BRIDGE_MODEL`, `CLAUDE_BRIDGE_BUDGET`, `PI_BRIDGE_MODEL` override).
 

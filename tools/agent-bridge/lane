@@ -20,52 +20,24 @@ set -euo pipefail
 
 die() { echo "lane: $*" >&2; exit 1; }
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Shared session/tree/registry primitives (task 154, "shared core, not a
+# copy"): canon, tree_of, is_live, session_fields, session_by_id, short_id,
+# review_only, reg_rows, lane_common_dir/lane_registry_path. `lane-guard`
+# sources the same file so the two never drift into two implementations of
+# "who is live" or "what tree is this".
+source "${script_dir}/lib/lane-core.sh"
+# task 200: the shared main-checkout root (dirname of the git-common-dir), so
+# `lane new --worktree` puts the worktree in one place however it was invoked.
+source "${script_dir}/lib/repo-root.sh"
+
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not inside a git repo"
-common="$(cd "$(git rev-parse --git-common-dir)" && pwd)"
-REG="${common}/lanes.tsv"
-[ -f "$REG" ] || printf 'name\tagent\tsession\tdir\tbranch\towns\tcreated\tclaimed_by\n' > "$REG"
+common="$(lane_common_dir)"
+REG="$(lane_registry_path)"
 
 # Live Claude sessions come from session files, one JSON per session, with keys
 # pid, sessionId, cwd, name, status. Tests and callers can point this elsewhere.
 sessions_dir="${LANE_SESSIONS_DIR:-$HOME/.claude/sessions}"
-
-reg_rows() { tail -n +2 "$REG" 2>/dev/null; }
-short_id() { printf '%.8s' "$1"; }
-
-# canon <path> — canonical absolute path (symlinks resolved), so /private/tmp vs
-# /tmp or any symlink cannot make two paths for one tree look different. Falls
-# back to the path unchanged if it can't be cd'd into (does not exist yet).
-canon() { local p; p="$(cd -P "$1" 2>/dev/null && pwd -P)" || { printf '%s' "$1"; return; }; printf '%s' "$p"; }
-
-# tree_of <path> — canonical `git rev-parse --show-toplevel` of <path>; empty
-# when <path> is not inside a git work tree. Never fails (set -e safe).
-tree_of() {
-  local d t
-  d="$(canon "$1")"
-  t="$(git -C "$d" rev-parse --show-toplevel 2>/dev/null)" || t=""
-  [ -n "$t" ] || return 0
-  canon "$t"
-}
-
-is_live() { kill -0 "$1" 2>/dev/null; }
-
-# session_fields <file> — pid\tsessionId\tcwd\tname\tstatus; empty if unparseable.
-session_fields() { jq -r '[.pid//"",.sessionId//"",.cwd//"",.name//"",.status//""]|@tsv' "$1" 2>/dev/null || true; }
-
-# session_by_id <sessionId> — the one session file whose .sessionId matches, as
-# pid\tsessionId\tcwd\tname\tstatus; empty if none. Never fails.
-session_by_id() {
-  local want="$1" f pid sid cwd name status
-  for f in "$sessions_dir"/*.json; do
-    [ -f "$f" ] || continue
-    IFS=$'\t' read -r pid sid cwd name status <<< "$(session_fields "$f")"
-    [ -n "$sid" ] || continue
-    [ "$sid" = "$want" ] || continue
-    printf '%s\t%s\t%s\t%s\t%s\n' "$pid" "$sid" "$cwd" "$name" "$status"
-    return 0
-  done
-  return 0
-}
 
 # claimant_name <sessionId> — the session's name, else "the claiming session".
 claimant_name() {
@@ -92,18 +64,6 @@ claimant_state() {
   fi
 }
 
-# review_only <owns> — true when every owned path is a pr/<n> pseudo-path, i.e.
-# the lane claims a PR review and edits no tree. Such a lane neither needs the
-# one-writer-per-tree gate nor counts as holding the tree it was claimed from.
-review_only() {
-  local o="$1" a
-  [ -n "$o" ] || return 1
-  for a in ${o//,/ }; do
-    case "$a" in pr/*) : ;; *) return 1 ;; esac
-  done
-  return 0
-}
-
 # holder_for <dir> — if another live session holds <dir> (a live Claude session's
 # cwd resolves to that tree, or a lane claims that dir with a live claimant),
 # print "DESC<TAB>NAME" (holder description + the name to SendMessage to). Empty
@@ -122,7 +82,7 @@ holder_for() {
       is_live "$pid" || continue
       [ -n "$cwd" ] || continue
       [ "$(tree_of "$cwd")" = "$tree" ] || continue
-      printf 'session %s [%s] (pid %s)\t%s\n' "$name" "$(short_id "$sid")" "$pid" "$name"
+      printf 'session %s [%s] (pid %s)\t%s\t%s\n' "$name" "$(short_id "$sid")" "$pid" "$name" "$sid"
       return 0
     done
   fi
@@ -137,7 +97,7 @@ holder_for() {
     IFS=$'\t' read -r cpid csid ccwd cname cstatus <<< "$(session_by_id "$r_claimed")"
     [ -n "$cpid" ] || continue
     is_live "$cpid" || continue
-    printf 'lane %s (claimed by %s [%s])\t%s\n' "$r_name" "$cname" "$(short_id "$csid")" "$cname"
+    printf 'lane %s (claimed by %s [%s])\t%s\t%s\n' "$r_name" "$cname" "$(short_id "$csid")" "$cname" "$csid"
     return 0
   done <<< "$(reg_rows)"
   return 0
@@ -269,6 +229,47 @@ check_review_claim() {
   return 0
 }
 
+# review_claim_lock <pr> — the mkdir lock for pr/<n>, ask-pi's thread-lock shape
+# (task 156). mkdir success is the ONLY thing that ever means "I hold the lock":
+# the pid is published with a temp-file + mv (atomic on one filesystem), so a
+# racer never sees a freshly-made lock whose pid file is torn or absent. On a
+# lost mkdir, only a pid file that names a demonstrably dead process is
+# reclaimed; an absent/unreadable pid means someone is mid-acquisition, so we
+# back off and retry a bounded number of times instead of rm -rf'ing under them.
+review_claim_lock() {
+  local pr="$1" lock pidfile holder tmpfile i=0
+  lock="${common}/.lane-review-${pr}.lock"
+  pidfile="${lock}/pid"
+  while :; do
+    if mkdir "$lock" 2>/dev/null; then
+      # test hook (task 156): hold the mkdir→pid-write window open so the
+      # deterministic race test can prove a racer backs off and never reclaims.
+      # Gated behind LANE_TEST_MODE=1 so a stray env var in a real shell cannot
+      # silently widen the lock window.
+      if [ "${LANE_TEST_MODE:-}" = 1 ] && [ -n "${LANE_TEST_LOCK_DELAY:-}" ]; then
+        sleep "${LANE_TEST_LOCK_DELAY}"
+      fi
+      tmpfile="${lock}/pid.$$"
+      echo $$ > "$tmpfile"
+      mv "$tmpfile" "$pidfile" 2>/dev/null || { rm -rf "$lock"; echo "lane: cannot lock pr/$pr" >&2; exit 3; }
+      return 0
+    fi
+    holder="$(cat "$pidfile" 2>/dev/null || true)"
+    if [ -n "$holder" ]; then
+      if kill -0 "$holder" 2>/dev/null; then
+        echo "lane: review of PR $pr is being claimed right now (pid $holder) — retry in a moment (task 109)." >&2
+        exit 3
+      fi
+      rm -rf "$lock"                     # stale: the pid named a dead process
+      continue
+    fi
+    # pid absent/unreadable: the holder is still mid-acquisition — back off.
+    i=$((i + 1))
+    [ "$i" -le 250 ] || { echo "lane: cannot lock pr/$pr (still being acquired after $i retries)" >&2; exit 3; }
+    sleep 0.02
+  done
+}
+
 lane_new() {
   local name="" agent="" owns="" wt="" wt_branch="" share=0
   while [ $# -gt 0 ]; do
@@ -291,20 +292,77 @@ lane_new() {
     else die "usage: lane new requires --agent when neither CLAUDE_CODE_SESSION_ID nor PI_SESSION_ID is set"; fi
   fi
 
+  # task 156: the check-then-append below is two registry touches that must not
+  # interleave. Take ask-pi's mkdir thread-lock (one per pr/<n>) in the shared
+  # git dir and hold it until the append at the end of this function, so two
+  # same-instant claims of one PR cannot both pass check_review_claim.
+  # Deliberately NOT `local`: the EXIT trap below fires after this function
+  # returns, and a `local` var is out of scope by then — the trap would see an
+  # empty string and release nothing. Do not add `local` here; it silently
+  # reintroduces the lock leak task 156 closed, and none of tests 19-22 would
+  # catch it (they only exercise refusal/race paths, not a winning claim's
+  # cleanup on the ordinary success path).
+  lane_lockdirs=""
+  # task 156: install signal/exit handling ONCE, before the first lock is taken.
+  # Cleanup is EXIT-only — EXIT fires however the process exits, and it reads
+  # ${lane_lockdirs} at fire time, so every lock grabbed (including a later one
+  # in a multi-pr --owns list) is released even on a mid-loop refusal. INT/TERM
+  # must call `exit` themselves: a trap handler that doesn't exit RESUMES at the
+  # next statement after the signal, so a bare cleanup trap on INT/TERM would
+  # free the lock early and then keep running to append the row (the two-winners
+  # race task 156 closes, reopened through Ctrl-C). 130/143 = 128+signal.
+  trap 'for l in ${lane_lockdirs}; do rm -rf "$l" 2>/dev/null; done' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  local l_own l_pr seen_prs=""
+  for l_own in ${owns//,/ }; do
+    case "$l_own" in
+      pr/*)
+        l_pr="${l_own#pr/}"
+        case "$l_pr" in
+          ''|*[!0-9]*) echo "lane: pr/<n> must be numeric, got '$l_own'" >&2; exit 64 ;;
+        esac
+        # task 156: dedupe pr/<n> — a duplicate would re-enter review_claim_lock
+        # for the same PR, read its OWN pid, and self-refuse with a misleading
+        # "already claimed by another" message.
+        case " $seen_prs " in *" $l_pr "*) continue ;; esac
+        seen_prs="${seen_prs} $l_pr"
+        review_claim_lock "$l_pr"
+        lane_lockdirs="${lane_lockdirs} ${common}/.lane-review-${l_pr}.lock"
+        ;;
+    esac
+  done
+
+  # test hook (task 156): hold the post-lock window open — lock acquired, traps
+  # installed — so the deterministic SIGTERM test can prove a signal actually
+  # STOPS the process instead of freeing the lock early and resuming to append.
+  # Gated behind LANE_TEST_MODE=1 so a stray env var in a real shell cannot
+  # silently pause a real claim.
+  if [ "${LANE_TEST_MODE:-}" = 1 ] && [ -n "${LANE_TEST_POST_LOCK_DELAY:-}" ] && [ -n "$lane_lockdirs" ]; then
+    sleep "${LANE_TEST_POST_LOCK_DELAY}"
+  fi
+
   # one review per PR (task 109, CEO 2026-09-24): a second claim of pr/<n> is
   # refused outright — it names the live holder or demands an explicit `lane rm`.
   check_review_claim "$name" "$owns" || exit 3
 
   grep -q "^${name}$(printf '\t')" "$REG" && die "lane '$name' already exists (lane ls)"
 
-  local root repo dir branch claimed_by
+  local root repo dir branch claimed_by main_root
   root="$(canon "$(git rev-parse --show-toplevel)")"
-  repo="$(basename "$(dirname "$common")")"
-  [ "$(basename "$common")" = ".git" ] || repo="$(basename "$root")"
+  # task 200: anchor `repo` and a --worktree's dir to the MAIN checkout, not the
+  # invoking worktree. agent_bridge_root resolves the shared main-checkout root
+  # from the git-common-dir, so `lane new --worktree` lands at the same
+  # <main-parent>/<repo>-<name> path however it was invoked — run from inside a
+  # nested worktree, the old `dirname root` nested the new worktree under that
+  # worktree instead. Fall back to this worktree's root if resolution fails.
+  main_root="$(agent_bridge_root 2>/dev/null)" || main_root=""
+  if [ -n "$main_root" ]; then main_root="$(canon "$main_root")"; else main_root="$root"; fi
+  repo="$(basename "$main_root")"
 
   if [ -n "$wt" ]; then
     wt_branch="${wt_branch:-lane/${name}}"
-    dir="$(dirname "$root")/${repo}-${name}"
+    dir="$(dirname "$main_root")/${repo}-${name}"
   else
     dir="$root"
   fi
@@ -313,14 +371,18 @@ lane_new() {
   # by another live session, unless --share-worktree says the pairing is
   # deliberate. Read-only co-tenancy is fine; only the write-claim is gated.
   claimed_by="${CLAUDE_CODE_SESSION_ID:-${PI_SESSION_ID:-}}"
-  local holder_line="" holder_desc holder_name
+  local holder_line="" holder_desc holder_name holder_sid
   # A review claim (owns only pr/<n>) edits no tree, so the tree gate does not apply (task 109).
   review_only "$owns" || holder_line="$(holder_for "$dir")"
   if [ -n "$holder_line" ]; then
-    IFS=$'\t' read -r holder_desc holder_name <<< "$holder_line"
+    IFS=$'\t' read -r holder_desc holder_name holder_sid <<< "$holder_line"
     if [ "$share" = 1 ]; then
       echo "lane: WARNING: ${holder_desc} holds ${dir} — bypassing the one-writer-per-tree rule (task 107, CEO 2026-09-24)." >&2
       echo "lane: tell them: SendMessage to \"${holder_name}\"" >&2
+      # task 154: the holder is told too, once per co-tenant — not just this
+      # session's own warning. A notice in the holder's queue, delivered by
+      # `lane-guard notices` on its next prompt/tool call.
+      lane_notify_holder "$holder_sid" "is sharing" "$(claimant_name "$claimed_by")" "$(short_id "$claimed_by")" "$dir" || true
     else
       echo "lane: refusing to claim ${dir}: held by ${holder_desc}." >&2
       echo "lane: two live windows writing one tree is the task 107 hazard — if this pairing is deliberate, re-run with --share-worktree." >&2
@@ -372,7 +434,7 @@ lane_new() {
     reach_cmd="ask-pi -t ${name} \"<message>\""
   fi
   if [ "$is_wt" = 1 ]; then
-    worktree_line="yes — linked worktree"
+    worktree_line="yes — linked worktree"; [ -n "$wt" ] && worktree_line="yes — linked worktree — --worktree always lands at $(dirname "$main_root")/${repo}-<name>"
     guard="own worktree — commit freely on ${branch}"
   elif [ -n "$owns" ]; then
     worktree_line="no — shared main checkout"

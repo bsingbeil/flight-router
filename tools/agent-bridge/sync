@@ -27,9 +27,9 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # counting THAT repo's unrelated files and reporting nonsense. See README.md
 # "What sync mirrors, and what it doesn't".
 SCRIPTS=(
-  ask-pi ask-claude lane README.md sync
+  ask-pi ask-claude lane lane-guard README.md sync
   dispatch.sh
-  lib/frontmatter.sh lib/portable-date.sh lib/repo-root.sh
+  lib/frontmatter.sh lib/lane-core.sh lib/portable-date.sh lib/repo-root.sh
 )
 
 TARGETS=(
@@ -118,8 +118,8 @@ for target in "${TARGETS[@]}"; do
     mkdir -p "$(dirname "$dest/$f")"
     cp "$SRC/$f" "$dest/$f"
   done
-  chmod 755 "$dest"/ask-pi "$dest"/ask-claude "$dest"/lane "$dest"/sync \
-    "$dest"/dispatch.sh
+  chmod 755 "$dest"/ask-pi "$dest"/ask-claude "$dest"/lane "$dest"/lane-guard \
+    "$dest"/sync "$dest"/dispatch.sh
   echo "synced   $target  ($ref: ${changes[*]})"
   copied=$((copied + 1))
 done
