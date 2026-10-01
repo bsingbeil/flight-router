@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from nodes import NODES, Node
-from connections import TrainConnection, get_train_connections_from
+from connections import CHONGQING_STATIONS, TrainConnection, get_train_connections_from
 
 
 # ---------- Mode constants ----------
@@ -87,7 +87,7 @@ class Itinerary:
 # airport before the next flight leg. Maps rail-arrival code → flight-departure code.
 RAIL_TO_AIRPORT: dict[str, str] = {
     "HKG-WK": "HKG",   # West Kowloon HSR → HKG airport (~30–40min)
-    # CKG-N → CKG is implicit (CKG-N is only ever an *origin* for trains)
+    # CKG-N / CKG-W → CKG is implicit (they're only ever *origins* for trains)
 }
 
 
@@ -220,7 +220,8 @@ def generate_candidates(
 
     # Stage 3: train + fly (CKG-only currently)
     if include_train and origin_code == "CKG":
-        for tc in get_train_connections_from("CKG-N"):
+        train_conns = [tc for st in CHONGQING_STATIONS for tc in get_train_connections_from(st)]
+        for tc in train_conns:
             train_arrival = tc.destination
             airport_to_fly_from = RAIL_TO_AIRPORT.get(train_arrival, train_arrival)
 
@@ -236,7 +237,7 @@ def generate_candidates(
 
             train_leg = Leg(
                 mode=TRAIN,
-                origin="CKG-N",
+                origin=tc.origin,
                 destination=train_arrival,
                 duration_min=tc.duration_min,
                 cost_cny=tc.cost_cny_2nd_class,

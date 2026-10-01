@@ -1,12 +1,16 @@
 """
 connections.py — high-speed rail connections useful for first-leg routing.
 
-Currently models HSR from Chongqing North (CKG-N). Train fares are stored in
-CNY since that's the source-of-truth currency; pricer.py converts to display
-currency at runtime.
+One entry per destination, from whichever Chongqing station (North or West)
+has the fastest regular (non-sleeper) train. Duration and fare are that
+train's, from data/train_timetable.csv (12306 timetable as of 2026-10-15).
+timetable.py has every individual train; this file is the per-route summary
+the routing engine uses. Re-derive these numbers when the timetable is
+refreshed — tests/test_timetable.py checks they still match.
 
-Numbers are *approximations* sufficient for cost/time *comparison* against
-flight options. Always verify on Trip.com or 12306 before booking.
+Train fares are stored in CNY since that's the source-of-truth currency;
+pricer.py converts to display currency at runtime. Always verify on Trip.com
+or 12306 before booking.
 """
 
 from __future__ import annotations
@@ -15,66 +19,69 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+# Chongqing stations trains can start from (must exist in NODES).
+CHONGQING_STATIONS = ("CKG-N", "CKG-W")
+
+
 @dataclass
 class TrainConnection:
     origin: str               # node code (must exist in NODES)
     destination: str          # node code (must exist in NODES)
     duration_min: int
-    cost_cny_2nd_class: int   # CNY, source-of-truth
+    cost_cny_2nd_class: float # CNY, source-of-truth
     frequency: str            # human-readable, for display only
     notes: str = ""
 
 
-# Hardcoded HSR options out of CKG-N. Approximate 2nd-class hard-seat fares
-# and durations. Verify on Trip.com / 12306 before booking.
 TRAIN_CONNECTIONS: list[TrainConnection] = [
     TrainConnection(
-        origin="CKG-N", destination="CTU",
-        duration_min=75, cost_cny_2nd_class=153,
-        frequency="every 20–30min, 06:00–22:30",
-        notes="Frequent. Easiest CKG → Chengdu transit option.",
+        origin="CKG-W", destination="CTU",
+        duration_min=64, cost_cny_2nd_class=149,
+        frequency="59 daily from CKG-W 06:00–21:52 (+50 from CKG-N)",
+        notes="Fastest: G8608. Very frequent from both stations; arrives Chengdu East.",
     ),
     TrainConnection(
-        origin="CKG-N", destination="XIY",
-        duration_min=300, cost_cny_2nd_class=340,
-        frequency="hourly daytime",
-        notes="Useful for connecting to north-China flights via XIY.",
+        origin="CKG-W", destination="XIY",
+        duration_min=301, cost_cny_2nd_class=384,
+        frequency="15 daily from CKG-W 06:41–17:59 (+6 from CKG-N)",
+        notes="Fastest: D968. Cheapest are D-trains from CKG-N (~¥294). Arrives Xi'an North.",
     ),
     TrainConnection(
-        origin="CKG-N", destination="CAN",
-        duration_min=420, cost_cny_2nd_class=640,
-        frequency="several daily",
-        notes="Long ride; only worth it for cheap CAN-based long-haul.",
+        origin="CKG-W", destination="CAN",
+        duration_min=346, cost_cny_2nd_class=508,
+        frequency="13 daily from CKG-W 06:51–21:37, incl. 2 overnight D-trains",
+        notes="Fastest: G2965. Arrives Guangzhou South.",
     ),
     TrainConnection(
-        origin="CKG-N", destination="SZX",
-        duration_min=450, cost_cny_2nd_class=695,
-        frequency="several daily",
-        notes="Long ride; SZX has decent SE-Asia + domestic options.",
+        origin="CKG-W", destination="SZX",
+        duration_min=388, cost_cny_2nd_class=582.5,
+        frequency="5 daily from CKG-W 06:51–21:37, incl. 1 overnight D-train",
+        notes="Fastest: G2965. Arrives Shenzhen North. None from CKG-N.",
     ),
     TrainConnection(
-        origin="CKG-N", destination="HKG-WK",
-        duration_min=480, cost_cny_2nd_class=870,
-        frequency="1–2 direct daily; otherwise via SZX",
-        notes="Train arrives at West Kowloon; ~30–40min to HKG airport.",
+        origin="CKG-W", destination="HKG-WK",
+        duration_min=433, cost_cny_2nd_class=788,
+        frequency="1 daily: G905 08:44 → 15:57",
+        notes="Only direct train. Arrives West Kowloon; ~30–40min to HKG airport. "
+              "Otherwise train to SZX and cross the border.",
     ),
     TrainConnection(
-        origin="CKG-N", destination="KMG",
-        duration_min=300, cost_cny_2nd_class=330,
-        frequency="several daily",
-        notes="Useful for KMG-based SE-Asia routes.",
+        origin="CKG-W", destination="KMG",
+        duration_min=291, cost_cny_2nd_class=342,
+        frequency="14 daily from CKG-W 06:41–17:42 (+4 from CKG-N)",
+        notes="Fastest: G2881. Arrives Kunming South.",
     ),
     TrainConnection(
         origin="CKG-N", destination="PEK",
-        duration_min=720, cost_cny_2nd_class=880,
-        frequency="overnight + one daytime",
-        notes="Long; sleeper options exist.",
+        duration_min=430, cost_cny_2nd_class=834,
+        frequency="6 daily from CKG-N 07:21–16:28, incl. 3 overnight D-trains",
+        notes="Fastest: G330. Overnight D-trains (~18h) are ~¥340. Arrives Beijing West.",
     ),
     TrainConnection(
-        origin="CKG-N", destination="PVG",
-        duration_min=600, cost_cny_2nd_class=830,
-        frequency="several daily",
-        notes="Long ride; PVG has the widest international network.",
+        origin="CKG-W", destination="PVG",
+        duration_min=541, cost_cny_2nd_class=870,
+        frequency="5 daily from CKG-W 07:53–09:22 (+14 from CKG-N, incl. overnight)",
+        notes="Fastest: G243. Arrives Shanghai Hongqiao — ~60–75min to PVG; SHA is next door.",
     ),
 ]
 
