@@ -26,6 +26,7 @@ from typing import Callable, Optional
 from candidates import FLIGHT, TRAIN, Itinerary, Leg
 import browser_pricer
 import currency
+import timetable
 
 
 # ---------- Configuration ----------
@@ -48,6 +49,7 @@ class PricedLeg:
     cost: Optional[float] = None
     duration_min: Optional[int] = None
     airline: Optional[str] = None
+    departs: Optional[str] = None     # local departure time, ISO "YYYY-MM-DDTHH:MM" (flights only)
     error: Optional[str] = None
 
     @property
@@ -103,7 +105,8 @@ def _real_fli_search(origin: str, destination: str, date: str) -> Optional[dict]
     """Real call to fli library. Returns None if no flights found.
 
     Returns:
-        {"price": float, "currency": str, "duration_min": int, "airline": str}
+        {"price": float, "currency": str, "duration_min": int, "airline": str,
+         "departs": "YYYY-MM-DDTHH:MM" (local time at origin)}
 
     `currency` is whatever Google Flights returns (often the IP-geolocated
     currency, e.g. JPY, USD, CNY). Pricer downstream converts to display.
@@ -159,11 +162,16 @@ def _real_fli_search(origin: str, destination: str, date: str) -> Optional[dict]
         print(f"[pricer] WARN: fli returned no currency for {origin}->{destination}; "
               f"assuming USD. Price={best.price}. If totals look ~7-150x off, this is the cause.")
 
+    departs = None
+    if best.legs and best.legs[0].departure_datetime:
+        departs = best.legs[0].departure_datetime.isoformat(timespec="minutes")
+
     return {
         "price": float(best.price),
         "currency": best.currency or "USD",
         "duration_min": int(best.duration),
         "airline": airline_name,
+        "departs": departs,
     }
 
 
@@ -198,11 +206,14 @@ def _mock_fli_search(origin: str, destination: str, date: str) -> Optional[dict]
     price_usd = distance * 0.10 * (0.85 + h / 333)   # ±15% variation
     # 800 km/h cruise + 30min taxi/turn time.
     duration_min = int(distance / 800 * 60 + 30)
+    # Departure somewhere between 07:00 and 22:45, on the quarter hour.
+    dep_min = 7 * 60 + (h * 37 % 64) * 15
     return {
         "price": round(price_usd, 2),
         "currency": "USD",
         "duration_min": duration_min,
         "airline": f"MOCK-{(h % 7) + 1}",
+        "departs": f"{date}T{dep_min // 60:02d}:{dep_min % 60:02d}",
     }
 
 
@@ -249,6 +260,7 @@ def _price_flight_leg(leg: Leg, date: str, cache: dict, cache_lock: threading.Lo
         "cost": cost,
         "duration_min": result["duration_min"],
         "airline": result.get("airline"),
+        "departs": result.get("departs"),
     }
     with cache_lock:
         cache[cache_key] = payload
@@ -325,6 +337,34 @@ def rank_by_duration(priced: list[PricedItinerary]) -> list[PricedItinerary]:
 
 # ---------- Pretty-printing ----------
 
+def train_suggestions(p: PricedItinerary, limit: int = 3) -> list[str]:
+    """Which trains to look for, for an itinerary that starts with a train leg.
+
+    Uses the departure time of the flight after the train and the real
+    timetable. Empty list if the itinerary has no train or the flight time
+    isn't known.
+    """
+    from datetime import datetime
+
+    legs = p.priced_legs
+    for i, pl in enumerate(legs[:-1]):
+        if pl.leg.mode != TRAIN:
+            continue
+        flight = legs[i + 1]
+        if not flight.departs:
+            return []
+        departs = datetime.fromisoformat(flight.departs)
+        options = timetable.suggest_trains(pl.leg.destination, departs, limit=limit)
+        head = f"flight {flight.leg.origin} {departs:%H:%M} — "
+        if not options:
+            return [head + "no direct train fits this flight; try another day or a connection"]
+        day = departs.date()
+        return [head + "trains: " + options[0].describe(day)] + [
+            " " * len(head) + "        " + o.describe(day) for o in options[1:]
+        ]
+    return []
+
+
 def format_results(
     priced: list[PricedItinerary],
     top_n: int = 10,
@@ -361,6 +401,7 @@ def format_results(
     header = f"{'#':>3}  {'Cost':>8}  {'Time':>7}  {col_label:>12}  Routing"
     lines = [intent, "", header, "-" * 90]
 
+    shown_trains = False
     for i, p in enumerate(priced[:top_n], 1):
         cost_str = currency.format_amount(p.total_cost)
         dur_str = p.total_duration_human
@@ -389,7 +430,13 @@ def format_results(
                 comp_str = f"{sym}{rate:,.0f}/hr"
 
         lines.append(f"{i:>3}.  {cost_str:>8}  {dur_str:>7}  {comp_str:>12}  {p.itinerary.describe()}")
+        for s in train_suggestions(p):
+            shown_trains = True
+            lines.append(f"{'':>38}↳ {s}")
 
+    if shown_trains:
+        lines.append(f"\n  (Train times: 12306 timetable as of {timetable.TIMETABLE_AS_OF}. "
+                     f"Verify on 12306 / Trip.com — tickets go on sale 15 days ahead.)")
     failed = [p for p in priced if not p.is_complete]
     if failed:
         lines.append(f"\n  ({len(failed)} candidates failed pricing — likely no service on one or more legs)")

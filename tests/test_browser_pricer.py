@@ -36,6 +36,7 @@ def _tmp_cache(tmp_path, monkeypatch):
 def test_parse_real_label():
     assert browser_pricer.parse_result_label(EASYJET, DATE) == {
         "price": 216.0, "currency": "USD", "duration_min": 110, "airline": "easyJet",
+        "departs": "2026-09-20T16:45",
     }
 
 

@@ -10,7 +10,7 @@ The point is to automate the manual work of comparing multi-hop options that Goo
 
 ## Status
 
-**v1 complete with caveats.** Five-module pipeline runs end-to-end against the live `fli` (Google Flights) library. CLI available as `python cli.py CKG VIE 2026-09-15`. Test suite is 61 tests covering candidate generation, connections data, types, currency conversion, end-to-end mock pricing, CLI argument parsing, and the browser fallback pricer.
+**v1 complete with caveats.** Five-module pipeline runs end-to-end against the live `fli` (Google Flights) library. CLI available as `python cli.py CKG VIE 2026-09-15`. Test suite is 74 tests covering candidate generation, connections data, types, currency conversion, end-to-end mock pricing, CLI argument parsing, the browser fallback pricer, and train timetable suggestions.
 
 **Caveat — fli library has a price-parsing bug** for many intra-China and China-exit legs (SGN→CKG, HAN→CKG, HKG→CKG when on CNY-priced carriers). Fli returns `price=0.0` for these, which we now defensively treat as "no valid result" so the leg is marked unpriceable and the itinerary is excluded from rankings. This is the right safety choice — better to surface fewer options correctly than many options wrongly — but it means routings through certain Vietnamese and Chinese hubs disappear from results entirely. The user's primary use case (CKG → EUROPE via Middle East / East Asia hubs) is unaffected.
 
@@ -20,7 +20,8 @@ The point is to automate the manual work of comparing multi-hop options that Goo
 
 ```
 nodes.py         airports + train stations as routing nodes
-connections.py   HSR connections from CKG-N
+connections.py   HSR connections from CKG-N (rough per-route summary used for routing)
+timetable.py     real train departures (data/train_timetable.csv) → which train to catch
 candidates.py    routing engine (pure function, no I/O)
 pricer.py        calls fli per leg, ranks results
 browser_pricer.py  Playwright fallback when fli returns price=0
@@ -51,7 +52,7 @@ Read `ARCHITECTURE.md` for the full layered explanation. Read `README.md` for us
 - **fli rate limiting.** Repeated rapid queries against fli return HTTP 429. With `MAX_CONCURRENT_QUERIES = 6` in pricer.py and ~20-30 candidates per search, you can hit limits during heavy testing. Wait a few minutes between probe runs.
 - **fli currency drift.** fli returns prices in whatever currency Google Flights serves (often JPY due to IP geolocation). The pricer uses `currency.convert_to_display(price, native_ccy)` to normalise. If a price looks ~150x off, the source currency wasn't recognised — check `currency.TRACKED_CURRENCIES`.
 - **2-stop candidate explosion.** `max_stops=2` produces ~600 candidates for CHINA→EUROPE pairs. Default to `max_stops=1` and only escalate when needed.
-- **Train data is hardcoded.** Always verify on Trip.com or 12306 before booking a train leg the system suggests.
+- **Train data is hardcoded.** Always verify on Trip.com or 12306 before booking a train leg the system suggests. `data/train_timetable.csv` holds real departures (as of `timetable.TIMETABLE_AS_OF`); China Railway revises the timetable ~4x/year, so refresh it after each revision. The per-route numbers in `connections.py` are older estimates and disagree with the timetable in places (e.g. PEK is 430 min, not 720; HKG-WK/SZX/CAN fast trains leave from Chongqing West, not North).
 
 ## What this isn't (yet)
 

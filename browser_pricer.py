@@ -80,6 +80,8 @@ def build_search_url(origin: str, destination: str, date: str) -> str:
 _PRICE_RE = re.compile(r"From ([\d,]+(?:\.\d+)?) ([A-Za-z .]+?)\.")
 _AIRLINE_RE = re.compile(r"flight with (.+?)\.")
 _DURATION_RE = re.compile(r"Total duration (?:(\d+) hr)?\s*(?:(\d+) min)?")
+# Google puts a narrow no-break space (U+202F) before AM/PM on some pages.
+_DEPART_RE = re.compile(r"Leaves .+? at (\d{1,2}):(\d{2})[\s\u202f]*([AP]M) on")
 
 
 def _date_phrase(date: str) -> str:
@@ -109,12 +111,19 @@ def parse_result_label(label: str, date: str) -> Optional[dict]:
         return None
     duration_min = int(dur_m.group(1) or 0) * 60 + int(dur_m.group(2) or 0)
 
+    departs = None
+    dep_m = _DEPART_RE.search(label)
+    if dep_m:
+        hour = int(dep_m.group(1)) % 12 + (12 if dep_m.group(3) == "PM" else 0)
+        departs = f"{date}T{hour:02d}:{dep_m.group(2)}"
+
     airline_m = _AIRLINE_RE.search(label)
     return {
         "price": price,
         "currency": ccy,
         "duration_min": duration_min,
         "airline": airline_m.group(1).strip() if airline_m else "Unknown",
+        "departs": departs,
     }
 
 

@@ -41,6 +41,8 @@ flight-router/
 ├── pricer.py        calls fli for each leg, ranks results
 ├── browser_pricer.py  backup pricer: reads Google Flights in a headless browser when fli reports C$0
 ├── currency.py      live FX rates with 24hr disk cache
+├── timetable.py     real train departures → suggests which train to catch for train+fly options
+├── data/train_timetable.csv  Chongqing train timetable (refresh after each China Railway timetable revision)
 └── cli.py           terminal entry point (python cli.py CKG VIE 2026-09-15)
 ```
 
@@ -184,7 +186,7 @@ Lets the whole pipeline be developed and tested without live API dependency. The
 
 - **No self-transfer detection.** Itineraries Google Flights won't combine (e.g., separately ticketed VietJet + China domestic). For those, supplement with [Kiwi.com](https://tequila.kiwi.com/) — could be added as a second pricer in the future.
 - **Chinese carrier fares.** Trip.com / Ctrip sometimes shows fares Google misses, especially in CNY for domestic carriers. Worth a manual sanity check on legs involving Spring, 9 Air, Loong Air, Ruili.
-- **Train data is approximate.** Always verify on Trip.com or 12306 before booking.
+- **Train data is approximate.** Train+fly results list real trains that make the connecting flight (from `data/train_timetable.csv`, allowing ~3h to reach the airport and check in), but route costs/durations still come from rough estimates in `connections.py`. Always verify on Trip.com or 12306 before booking.
 - **No date flexibility.** This searches one date at a time. The fli library supports flexible-date search via `search_dates`; not yet wired in here.
 - **No layover quality info.** A 2-hour layover and a 14-hour layover are treated the same in ranking. Future: penalty/bonus based on transfer duration.
 

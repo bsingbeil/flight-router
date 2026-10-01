@@ -1,0 +1,297 @@
+dest_code,train_no,from_station,depart,to_station,arrive,next_day,duration_min,second_class_cny,notes
+CTU,K1257,Chongqing North (重庆北),05:11,Chengdu West (成都西),09:13,0,242,¥96.5,sleeper train; price is lowest sleeper (hard sleeper)
+CTU,D49,Chongqing North (重庆北),05:25,Chengdu East (成都东),07:55,0,150,¥85.0,
+CTU,D983,Chongqing North (重庆北),05:29,Chengdu East (成都东),08:16,0,167,¥128.0,
+CTU,D987,Chongqing North (重庆北),05:34,Chengdu East (成都东),08:21,0,167,¥128.0,
+CTU,Z333,Chongqing North (重庆北),05:38,Chengdu West (成都西),09:00,0,202,¥96.5,sleeper train; price is lowest sleeper (hard sleeper)
+CTU,G8690,Chongqing North (重庆北),05:53,Chengdu East (成都东),07:16,0,83,¥140.0,
+CTU,D983,Chongqing West (重庆西),06:00,Chengdu East (成都东),08:16,0,136,¥121.0,
+CTU,D845,Chongqing West (重庆西),06:04,Chengdu East (成都东),08:02,0,118,¥97.0,
+CTU,D987,Chongqing West (重庆西),06:05,Chengdu East (成都东),08:21,0,136,¥121.0,
+CTU,D861,Chongqing West (重庆西),06:09,Chengdu East (成都东),08:07,0,118,¥95.0,
+CTU,C77,Chongqing North (重庆北),06:18,Chengdu East (成都东),09:14,0,176,¥85.0,
+CTU,G8650,Chongqing West (重庆西),06:32,Chengdu East (成都东),07:48,0,76,¥133.0,
+CTU,G3782,Chongqing West (重庆西),06:41,Chengdu East (成都东),07:56,0,75,¥153.0,
+CTU,K503,Chongqing North (重庆北),06:47,Chengdu West (成都西),10:52,0,245,¥96.5,sleeper train; price is lowest sleeper (hard sleeper)
+CTU,G8792,Chongqing West (重庆西),06:47,Chengdu East (成都东),08:24,0,97,¥125.0,
+CTU,G8586,Chongqing West (重庆西),06:57,Chengdu East (成都东),08:34,0,97,¥125.0,
+CTU,G5417,Chongqing West (重庆西),07:01,Chengdu South (成都南),10:00,0,179,¥217.0,
+CTU,G8502,Chongqing West (重庆西),07:15,Chengdu East (成都东),09:07,0,112,¥141.0,
+CTU,G8678,Chongqing West (重庆西),07:31,Chengdu East (成都东),09:12,0,101,¥141.0,
+CTU,G8784,Chongqing West (重庆西),07:44,Chengdu East (成都东),09:32,0,108,¥149.0,
+CTU,G8606,Shapingba (沙坪坝),07:55,Chengdu East (成都东),08:58,0,63,¥148.0,
+CTU,G8702,Chongqing North (重庆北),08:20,Chengdu East (成都东),10:02,0,102,¥158.0,
+CTU,G8660,Chongqing West (重庆西),08:21,Chengdu East (成都东),09:50,0,89,¥149.0,
+CTU,G8608,Chongqing East (重庆东),08:26,Chengdu East (成都东),10:17,0,111,¥176.0,
+CTU,G8733,Chongqing West (重庆西),08:35,Chengdu East (成都东),11:16,0,161,¥206.0,
+CTU,G1308,Chongqing West (重庆西),08:36,Chengdu East (成都东),10:08,0,92,¥149.0,
+CTU,G3290,Shapingba (沙坪坝),08:51,Chengdu East (成都东),10:32,0,101,¥148.0,
+CTU,G5763,Chongqing West (重庆西),08:56,Chengdu East (成都东),11:19,0,143,¥199.0,
+CTU,G8608,Chongqing West (重庆西),09:13,Chengdu East (成都东),10:17,0,64,¥149.0,
+CTU,G1976,Chongqing West (重庆西),09:22,Chengdu East (成都东),10:52,0,90,¥149.0,
+CTU,G3442,Shapingba (沙坪坝),09:29,Chengdu East (成都东),11:09,0,100,¥144.0,
+CTU,G8610,Chongqing North (重庆北),09:32,Chengdu East (成都东),10:58,0,86,¥166.0,
+CTU,G2234,Chongqing West (重庆西),09:53,Chengdu East (成都东),11:24,0,91,¥158.0,
+CTU,G1888,Chongqing West (重庆西),09:58,Chengdu East (成都东),11:41,0,103,¥149.0,
+CTU,G2452,Chongqing East (重庆东),10:12,Chengdu East (成都东),12:35,0,143,¥193.0,
+CTU,G8612,Shapingba (沙坪坝),10:30,Chengdu East (成都东),11:32,0,62,¥156.0,
+CTU,D6191,Chongqing North (重庆北),10:37,Chengdu East (成都东),13:05,0,148,¥107.0,
+CTU,D6191,Chongqing North (重庆北),10:37,Chengdu South (成都南),13:22,0,165,¥115.0,
+CTU,G8614,Chongqing West (重庆西),10:40,Chengdu East (成都东),11:46,0,66,¥149.0,
+CTU,G5787,Chongqing North (重庆北),10:42,Chengdu East (成都东),13:50,0,188,¥214.0,
+CTU,G8534,Chongqing West (重庆西),10:50,Chengdu South (成都南),12:42,0,112,¥158.0,
+CTU,D5109,Chongqing North (重庆北),10:57,Chengdu East (成都东),13:24,0,147,¥107.0,
+CTU,D5109,Chongqing North (重庆北),10:57,Chengdu West (成都西),13:56,0,179,¥123.0,
+CTU,G1834,Chongqing West (重庆西),10:57,Chengdu East (成都东),12:20,0,83,¥149.0,
+CTU,G2452,Chongqing West (重庆西),11:02,Chengdu East (成都东),12:35,0,93,¥166.0,
+CTU,G8762,Chongqing West (重庆西),11:12,Chengdu South (成都南),13:18,0,126,¥166.0,
+CTU,G5787,Chongqing West (重庆西),11:12,Chengdu East (成都东),13:50,0,158,¥195.0,
+CTU,G5766,Jiangbei Airport (江北机场),11:25,Chengdu East (成都东),14:17,0,172,¥219.0,
+CTU,G8620,Shapingba (沙坪坝),11:25,Chengdu East (成都东),12:27,0,62,¥156.0,
+CTU,G3968,Chongqing North (重庆北),11:29,Chengdu East (成都东),13:55,0,146,¥158.0,
+CTU,G2206,Chongqing West (重庆西),11:29,Chengdu East (成都东),12:58,0,89,¥166.0,
+CTU,G3210,Chongqing West (重庆西),11:34,Chengdu East (成都东),13:34,0,120,¥158.0,
+CTU,C831,Chongqing North (重庆北),11:37,Chengdu East (成都东),15:41,0,244,¥123.0,
+CTU,G5767,Chongqing North (重庆北),11:49,Chengdu East (成都东),14:17,0,148,¥211.0,
+CTU,G2448,Chongqing East (重庆东),11:52,Chengdu East (成都东),13:50,0,118,¥193.0,
+CTU,G8618,Shapingba (沙坪坝),12:05,Chengdu East (成都东),13:07,0,62,¥156.0,
+CTU,G3582,Chongqing West (重庆西),12:13,Chengdu East (成都东),13:28,0,75,¥153.0,
+CTU,G5767,Chongqing West (重庆西),12:18,Chengdu East (成都东),14:17,0,119,¥199.0,
+CTU,G2886,Chongqing West (重庆西),12:27,Chengdu East (成都东),14:02,0,95,¥166.0,
+CTU,G2450,Chongqing East (重庆东),12:28,Chengdu East (成都东),14:19,0,111,¥193.0,
+CTU,G2448,Chongqing West (重庆西),12:33,Chengdu East (成都东),13:50,0,77,¥166.0,
+CTU,G3360,Chongqing West (重庆西),12:38,Chengdu East (成都东),14:08,0,90,¥158.0,
+CTU,G2894,Chongqing West (重庆西),13:24,Chengdu East (成都东),14:40,0,76,¥166.0,
+CTU,G3424,Chongqing North (重庆北),13:24,Chengdu East (成都东),14:51,0,87,¥154.0,
+CTU,G2942,Chongqing West (重庆西),13:30,Chengdu East (成都东),14:46,0,76,¥166.0,
+CTU,G8771,Chongqing West (重庆西),13:44,Chengdu East (成都东),16:36,0,172,¥206.0,
+CTU,D631,Chongqing North (重庆北),13:51,Chengdu East (成都东),16:19,0,148,¥102.0,
+CTU,D631,Chongqing North (重庆北),13:51,Chengdu South (成都南),16:34,0,163,¥110.0,
+CTU,G8662,Shapingba (沙坪坝),13:52,Chengdu East (成都东),15:02,0,70,¥148.0,
+CTU,G3470,Chongqing West (重庆西),14:00,Chengdu East (成都东),15:16,0,76,¥153.0,
+CTU,G2164,Chongqing West (重庆西),14:05,Chengdu East (成都东),15:40,0,95,¥166.0,
+CTU,G3462,Chongqing North (重庆北),14:13,Chengdu East (成都东),16:07,0,114,¥161.0,
+CTU,G5423,Chongqing West (重庆西),14:15,Chengdu East (成都东),16:56,0,161,¥191.0,
+CTU,G3964,Chongqing North (重庆北),14:18,Chengdu East (成都东),15:45,0,87,¥158.0,
+CTU,G8624,Shapingba (沙坪坝),14:22,Chengdu East (成都东),15:25,0,63,¥164.0,
+CTU,G8686,Chongqing North (重庆北),14:37,Chengdu East (成都东),16:18,0,101,¥166.0,
+CTU,G2418,Chongqing East (重庆东),14:41,Chengdu East (成都东),16:48,0,127,¥193.0,
+CTU,D367,Chongqing North (重庆北),14:46,Chengdu East (成都东),16:54,0,128,¥102.0,
+CTU,G3765,Chongqing East (重庆东),15:02,Chengdu East (成都东),17:54,0,172,¥201.0,
+CTU,G2418,Chongqing West (重庆西),15:23,Chengdu East (成都东),16:48,0,85,¥166.0,
+CTU,G3432,Chongqing West (重庆西),15:29,Chengdu East (成都东),17:05,0,96,¥166.0,
+CTU,G3740,Chongqing West (重庆西),15:34,Chengdu East (成都东),17:12,0,98,¥172.0,
+CTU,G8533,Chongqing West (重庆西),15:38,Chengdu South (成都南),18:21,0,163,¥230.0,
+CTU,G8574,Shapingba (沙坪坝),15:43,Chengdu East (成都东),17:36,0,113,¥156.0,
+CTU,G3764,Jiangbei Airport (江北机场),15:50,Chengdu East (成都东),17:54,0,124,¥169.0,
+CTU,Z587,Chongqing North (重庆北),15:54,Chengdu West (成都西),18:42,0,168,¥96.5,sleeper train; price is lowest sleeper (hard sleeper)
+CTU,G8628,Jiangbei Airport (江北机场),15:59,Chengdu East (成都东),18:11,0,132,¥164.0,
+CTU,G3584,Chongqing West (重庆西),16:06,Chengdu East (成都东),17:22,0,76,¥153.0,
+CTU,D6195,Chongqing North (重庆北),16:09,Chengdu East (成都东),18:39,0,150,¥107.0,
+CTU,G3764,Chongqing North (重庆北),16:11,Chengdu East (成都东),17:54,0,103,¥161.0,
+CTU,G2852,Chongqing West (重庆西),16:11,Chengdu East (成都东),17:42,0,91,¥166.0,
+CTU,G2322,Chongqing East (重庆东),16:16,Chengdu East (成都东),18:24,0,128,¥193.0,
+CTU,G8628,Chongqing North (重庆北),16:26,Chengdu East (成都东),18:11,0,105,¥158.0,
+CTU,D619,Chongqing North (重庆北),16:31,Chengdu East (成都东),18:51,0,140,¥96.0,
+CTU,D2255,Chongqing North (重庆北),16:56,Chengdu East (成都东),19:10,0,134,¥102.0,
+CTU,G2322,Chongqing West (重庆西),17:08,Chengdu East (成都东),18:24,0,76,¥166.0,
+CTU,G3390,Chongqing North (重庆北),17:14,Chengdu South (成都南),19:01,0,107,¥175.0,
+CTU,D2259,Chongqing North (重庆北),17:20,Chengdu East (成都东),19:38,0,138,¥96.0,
+CTU,G2242,Shapingba (沙坪坝),17:33,Chengdu East (成都东),18:46,0,73,¥148.0,
+CTU,D3077,Chongqing North (重庆北),17:40,Chengdu East (成都东),19:43,0,123,¥102.0,
+CTU,D1821,Chongqing West (重庆西),17:43,Chengdu East (成都东),20:06,0,143,¥99.0,
+CTU,G1756,Chongqing West (重庆西),17:54,Chengdu East (成都东),19:18,0,84,¥141.0,
+CTU,G8664,Jiangbei Airport (江北机场),17:58,Chengdu East (成都东),20:07,0,129,¥164.0,
+CTU,D968,Chongqing West (重庆西),17:59,Chengdu East (成都东),19:29,0,90,¥121.0,
+CTU,G2890,Chongqing West (重庆西),18:05,Chengdu East (成都东),19:45,0,100,¥159.0,
+CTU,G8622,Chongqing North (重庆北),18:10,Chengdu East (成都东),19:34,0,84,¥166.0,
+CTU,G8664,Chongqing North (重庆北),18:16,Chengdu East (成都东),20:07,0,111,¥158.0,
+CTU,D353,Chongqing North (重庆北),18:21,Chengdu East (成都东),20:33,0,132,¥102.0,
+CTU,G8634,Jiangbei Airport (江北机场),18:27,Chengdu East (成都东),20:02,0,95,¥155.0,
+CTU,D2373,Chongqing North (重庆北),18:32,Chengdu East (成都东),20:27,0,115,¥96.0,
+CTU,G3357,Chongqing North (重庆北),18:40,Chengdu East (成都东),21:38,0,178,¥237.0,
+CTU,G8684,Jiangbei Airport (江北机场),18:46,Chengdu East (成都东),21:03,0,137,¥164.0,
+CTU,G8634,Chongqing North (重庆北),18:46,Chengdu East (成都东),20:02,0,76,¥149.0,
+CTU,D2237,Chongqing North (重庆北),18:50,Chengdu East (成都东),20:45,0,115,¥102.0,
+CTU,D953,Chongqing North (重庆北),19:06,Chengdu East (成都东),21:01,0,115,¥85.0,
+CTU,G8684,Chongqing North (重庆北),19:08,Chengdu East (成都东),21:03,0,115,¥158.0,
+CTU,G2276,Chongqing West (重庆西),19:08,Chengdu East (成都东),20:31,0,83,¥158.0,
+CTU,D361,Chongqing North (重庆北),19:11,Chengdu East (成都东),21:06,0,115,¥96.0,
+CTU,G3357,Chongqing West (重庆西),19:11,Chengdu East (成都东),21:38,0,147,¥217.0,
+CTU,G978,Chongqing North (重庆北),19:17,Chengdu East (成都东),20:45,0,88,¥175.0,
+CTU,D3057,Chongqing North (重庆北),19:29,Chengdu East (成都东),21:46,0,137,¥85.0,
+CTU,G2372,Chongqing West (重庆西),19:35,Chengdu East (成都东),20:58,0,83,¥159.0,
+CTU,D2207,Chongqing North (重庆北),19:36,Chengdu East (成都东),21:53,0,137,¥96.0,
+CTU,G8516,Shapingba (沙坪坝),19:43,Chengdu East (成都东),21:10,0,87,¥156.0,
+CTU,D2223,Chongqing North (重庆北),19:47,Chengdu East (成都东),22:03,0,136,¥85.0,
+CTU,G8694,Chongqing North (重庆北),19:59,Chengdu East (成都东),21:30,0,91,¥158.0,
+CTU,D5115,Chongqing North (重庆北),20:07,Chengdu East (成都东),22:14,0,127,¥102.0,
+CTU,D2243,Chongqing North (重庆北),20:13,Chengdu East (成都东),22:08,0,115,¥96.0,
+CTU,G3428,Chongqing North (重庆北),20:20,Chengdu East (成都东),22:00,0,100,¥158.0,
+CTU,G2870,Chongqing West (重庆西),20:21,Chengdu East (成都东),21:43,0,82,¥141.0,
+CTU,G3980,Chongqing North (重庆北),20:32,Chengdu East (成都东),21:49,0,77,¥158.0,
+CTU,G1477,Chongqing North (重庆北),20:52,Chengdu East (成都东),23:24,0,152,¥234.0,
+CTU,G3594,Chongqing West (重庆西),20:54,Chengdu East (成都东),22:17,0,83,¥166.0,
+CTU,G1984,Chongqing West (重庆西),21:14,Chengdu East (成都东),22:36,0,82,¥153.0,
+CTU,G1477,Chongqing West (重庆西),21:22,Chengdu East (成都东),23:24,0,122,¥217.0,
+CTU,G8638,Shapingba (沙坪坝),21:37,Chengdu East (成都东),22:47,0,70,¥139.0,
+CTU,G3586,Chongqing West (重庆西),21:47,Chengdu East (成都东),23:02,0,75,¥153.0,
+CTU,G2882,Chongqing West (重庆西),21:52,Chengdu East (成都东),23:22,0,90,¥141.0,
+CTU,G8642,Chongqing North (重庆北),,Chengdu East (成都东),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CTU,G5342,Chongqing West (重庆西),,Chengdu East (成都东),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CTU,G8646,Shapingba (沙坪坝),,Chengdu East (成都东),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CTU,G8506,Shapingba (沙坪坝),,Chengdu South (成都南),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CTU,G3352,Chongqing West (重庆西),,Chengdu East (成都东),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CTU,G8630,Shapingba (沙坪坝),,Chengdu East (成都东),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CTU,G8648,Shapingba (沙坪坝),,Chengdu East (成都东),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CTU,D5141,Chongqing North (重庆北),,Chengdu East (成都东),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CTU,G2240,Chongqing West (重庆西),,Chengdu East (成都东),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CTU,G8674,Shapingba (沙坪坝),,Chengdu East (成都东),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CTU,G2446,Chongqing East (重庆东),,Chengdu East (成都东),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CTU,G5755,Chongqing West (重庆西),,Chengdu East (成都东),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CTU,G1576,Chongqing West (重庆西),,Chengdu East (成都东),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CTU,G8654,Shapingba (沙坪坝),,Chengdu East (成都东),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CTU,G3588,Chongqing West (重庆西),,Chengdu East (成都东),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CTU,G2884,Chongqing West (重庆西),,Chengdu East (成都东),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CTU,G3712,Chongqing West (重庆西),,Chengdu East (成都东),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CTU,D5117,Chongqing North (重庆北),,Chengdu East (成都东),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+XIY,G3782,Chongqing West (重庆西),06:41,Xi'an North (西安北),12:26,0,345,¥438.0,
+XIY,D1713,Chongqing North (重庆北),07:19,Xi'an North (西安北),13:02,0,343,¥302.0,
+XIY,G1308,Chongqing West (重庆西),08:36,Xi'an North (西安北),14:04,0,328,¥418.0,
+XIY,G3290,Shapingba (沙坪坝),08:51,Xi'an North (西安北),14:40,0,349,¥433.0,
+XIY,G3896,Chongqing North (重庆北),09:03,Xi'an East (西安东),14:41,0,338,¥529.0,
+XIY,G1976,Chongqing West (重庆西),09:22,Xi'an North (西安北),15:01,0,339,¥465.0,
+XIY,G3442,Shapingba (沙坪坝),09:29,Xi'an North (西安北),15:28,0,359,¥444.0,
+XIY,G2234,Chongqing West (重庆西),09:53,Xi'an North (西安北),15:46,0,353,¥443.0,
+XIY,G1888,Chongqing West (重庆西),09:58,Xi'an North (西安北),16:01,0,363,¥434.0,
+XIY,K692,Chongqing West (重庆西),10:17,Yinzhen (引镇),19:07,0,530,¥171.0,sleeper train; price is lowest sleeper (hard sleeper)
+XIY,K692,Chongqing West (重庆西),10:17,Xi'an East (西安东),19:22,0,545,¥178.0,sleeper train; price is lowest sleeper (hard sleeper)
+XIY,G1834,Chongqing West (重庆西),10:57,Xi'an North (西安北),16:19,0,322,¥434.0,
+XIY,G2206,Chongqing West (重庆西),11:29,Xi'an North (西安北),17:05,0,336,¥482.0,
+XIY,G3210,Chongqing West (重庆西),11:34,Xi'an North (西安北),17:46,0,372,¥443.0,
+XIY,G3360,Chongqing West (重庆西),12:38,Xi'an North (西安北),18:19,0,341,¥443.0,
+XIY,G3892,Chongqing North (重庆北),14:57,Xi'an East (西安东),21:03,0,366,¥485.0,
+XIY,G3765,Chongqing East (重庆东),15:02,Xi'an North (西安北),21:56,0,414,¥486.0,
+XIY,G3432,Chongqing West (重庆西),15:29,Xi'an North (西安北),21:12,0,343,¥451.0,
+XIY,G3432,Chongqing West (重庆西),15:29,Xi'an East (西安东),21:40,0,371,¥469.0,
+XIY,G3740,Chongqing West (重庆西),15:34,Xi'an North (西安北),21:28,0,354,¥435.0,
+XIY,G3764,Jiangbei Airport (江北机场),15:50,Xi'an North (西安北),21:56,0,366,¥454.0,
+XIY,G2852,Chongqing West (重庆西),16:11,Xi'an North (西安北),21:33,0,322,¥435.0,
+XIY,G3764,Chongqing North (重庆北),16:11,Xi'an North (西安北),21:56,0,345,¥446.0,
+XIY,G2852,Chongqing West (重庆西),16:11,Xi'an East (西安东),22:02,0,351,¥453.0,
+XIY,G2242,Shapingba (沙坪坝),17:33,Xi'an North (西安北),22:43,0,310,¥433.0,
+XIY,G2242,Shapingba (沙坪坝),17:33,Xi'an East (西安东),23:11,0,338,¥451.0,
+XIY,D968,Chongqing West (重庆西),17:59,Xi'an North (西安北),23:00,0,301,¥384.0,
+XIY,D1985,Chongqing North (重庆北),17:59,Xi'an North (西安北),23:05,0,306,¥294.0,
+XIY,D1985,Chongqing North (重庆北),17:59,Xi'an East (西安东),23:32,0,333,¥310.0,
+XIY,K508,Chongqing North (重庆北),20:14,Xi'an East (西安东),05:55,1,581,¥178.0,sleeper train; price is lowest sleeper (hard sleeper)
+XIY,Z140,Chongqing West (重庆西),22:09,Xi'an East (西安东),06:15,1,486,¥178.0,sleeper train; price is lowest sleeper (hard sleeper)
+XIY,D1965,Chongqing West (重庆西),,Xi'an North (西安北),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+XIY,G3352,Chongqing West (重庆西),,Xi'an North (西安北),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+XIY,G3352,Chongqing West (重庆西),,Gaoling (高陵),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+XIY,G2240,Chongqing West (重庆西),,Xi'an North (西安北),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CAN,G2929,Chongqing West (重庆西),06:51,Guangzhou South (广州南),13:19,0,388,¥486.0,
+CAN,G905,Chongqing West (重庆西),08:44,Guangzhou South (广州南),14:57,0,373,¥573.0,
+CAN,K1095,Chongqing East (重庆东),09:10,Guangzhou Baiyun (广州白云),05:06,1,1196,¥296.5,sleeper train; price is lowest sleeper (hard sleeper)
+CAN,G2275,Chongqing West (重庆西),09:43,Guangzhou South (广州南),17:48,0,485,¥464.0,
+CAN,G3723,Chongqing West (重庆西),10:06,Guangzhou South (广州南),16:01,0,355,¥502.0,
+CAN,D1819,Chongqing West (重庆西),10:16,Guangzhou South (广州南),18:34,0,498,¥487.0,
+CAN,K355,Chongqing North (重庆北),11:03,Guangzhou North (广州北),08:05,1,1262,¥337.0,sleeper train; price is lowest sleeper (hard sleeper)
+CAN,G3725,Chongqing North (重庆北),12:35,Guangzhou (广州),20:15,0,460,¥509.0,
+CAN,G3725,Chongqing West (重庆西),13:02,Guangzhou (广州),20:15,0,433,¥493.0,
+CAN,G2239,Chongqing West (重庆西),13:18,Guangzhou South (广州南),20:31,0,433,¥486.0,
+CAN,K687,Chongqing East (重庆东),13:24,Guangzhou North (广州北),11:01,1,1297,¥337.0,sleeper train; price is lowest sleeper (hard sleeper)
+CAN,K201,Chongqing North (重庆北),13:48,Guangzhou Baiyun (广州白云),11:34,1,1306,¥337.0,sleeper train; price is lowest sleeper (hard sleeper)
+CAN,G3727,Chongqing West (重庆西),14:06,Guangzhou South (广州南),20:37,0,391,¥486.0,
+CAN,G2249,Chongqing North (重庆北),14:44,Guangzhou South (广州南),21:58,0,434,¥520.0,
+CAN,G2249,Chongqing West (重庆西),15:11,Guangzhou South (广州南),21:58,0,407,¥508.0,
+CAN,G2965,Chongqing West (重庆西),15:33,Guangzhou South (广州南),21:19,0,346,¥508.0,
+CAN,G2941,Chongqing West (重庆西),16:29,Guangzhou South (广州南),22:18,0,349,¥508.0,
+CAN,Z334,Chongqing North (重庆北),16:52,Guangzhou North (广州北),12:24,1,1172,¥337.0,sleeper train; price is lowest sleeper (hard sleeper)
+CAN,K1171,Chongqing East (重庆东),19:30,Guangzhou North (广州北),13:49,1,1099,¥296.5,sleeper train; price is lowest sleeper (hard sleeper)
+CAN,K813,Chongqing North (重庆北),20:19,Guangzhou Baiyun (广州白云),17:43,1,1284,¥337.0,sleeper train; price is lowest sleeper (hard sleeper)
+CAN,D847,Chongqing West (重庆西),20:59,Guangzhou South (广州南),08:25,1,686,¥481.0,
+CAN,D863,Chongqing West (重庆西),21:37,Guangzhou South (广州南),08:32,1,655,¥457.0,
+CAN,Z585,Chongqing North (重庆北),23:59,Guangzhou North (广州北),16:55,1,1016,¥296.5,sleeper train; price is lowest sleeper (hard sleeper)
+CAN,G1935,Chongqing West (重庆西),,Guangzhou Baiyun (广州白云),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CAN,G3721,Chongqing West (重庆西),,Guangzhou South (广州南),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CAN,G3711,Chongqing West (重庆西),,Guangzhou South (广州南),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CAN,D1831,Chongqing West (重庆西),,Guangzhou South (广州南),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CAN,D1835,Chongqing North (重庆北),,Guangzhou South (广州南),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CAN,D1835,Chongqing West (重庆西),,Guangzhou South (广州南),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CAN,D1787,Chongqing West (重庆西),,Guangzhou South (广州南),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CAN,G3713,Chongqing West (重庆西),,Guangzhou South (广州南),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CAN,G1575,Chongqing West (重庆西),,Guangzhou South (广州南),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CAN,G3749,Chongqing West (重庆西),,Guangzhou South (广州南),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CAN,G3729,Chongqing West (重庆西),,Guangzhou South (广州南),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CAN,K485,Chongqing North (重庆北),,Guangzhou North (广州北),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+CAN,K775,Chongqing North (重庆北),,Guangzhou North (广州北),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+SZX,G2929,Chongqing West (重庆西),06:51,Shenzhen North (深圳北),14:04,0,433,¥560.5,
+SZX,G905,Chongqing West (重庆西),08:44,Shenzhen North (深圳北),15:33,0,409,¥647.5,
+SZX,K355,Chongqing North (重庆北),11:03,Shenzhen East (深圳东),10:10,1,1387,¥353.0,sleeper train; price is lowest sleeper (hard sleeper)
+SZX,G2965,Chongqing West (重庆西),15:33,Shenzhen North (深圳北),22:01,0,388,¥582.5,
+SZX,G2941,Chongqing West (重庆西),16:29,Shenzhen North (深圳北),22:59,0,390,¥582.5,
+SZX,Z334,Chongqing North (重庆北),16:52,Shenzhen East (深圳东),14:11,1,1279,¥353.0,sleeper train; price is lowest sleeper (hard sleeper)
+SZX,D863,Chongqing West (重庆西),21:37,Shenzhen North (深圳北),09:17,1,700,¥502.0,
+SZX,Z585,Chongqing North (重庆北),23:59,Shenzhen East (深圳东),19:04,1,1145,¥322.5,sleeper train; price is lowest sleeper (hard sleeper)
+SZX,K485,Chongqing North (重庆北),,Shenzhen (深圳),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+HKG-WK,G905,Chongqing West (重庆西),08:44,Hong Kong West Kowloon (香港西九龙),15:57,0,433,¥788.0,cross-border train; travel document and HK entry endorsement required
+KMG,G2841,Chongqing West (重庆西),06:41,Kunming (昆明),11:51,0,310,¥385.5,
+KMG,G2871,Chongqing West (重庆西),07:33,Kunming South (昆明南),12:45,0,312,¥381.0,
+KMG,G2865,Chongqing North (重庆北),08:36,Kunming South (昆明南),15:01,0,385,¥513.0,
+KMG,G2873,Chongqing West (重庆西),08:49,Kunming South (昆明南),13:58,0,309,¥369.0,
+KMG,G2865,Chongqing West (重庆西),09:06,Kunming South (昆明南),15:01,0,355,¥495.0,
+KMG,G2883,Chongqing West (重庆西),10:00,Kunming South (昆明南),14:52,0,292,¥381.0,
+KMG,K985,Chongqing West (重庆西),10:31,Kunming (昆明),23:30,0,779,¥215.0,sleeper train; price is lowest sleeper (hard sleeper)
+KMG,G2885,Chongqing West (重庆西),11:19,Kunming South (昆明南),16:26,0,307,¥381.0,
+KMG,G2849,Chongqing West (重庆西),13:30,Kunming (昆明),18:33,0,303,¥385.5,
+KMG,G2867,Chongqing West (重庆西),15:00,Kunming South (昆明南),20:20,0,320,¥342.0,
+KMG,G3471,Chongqing North (重庆北),15:16,Kunming South (昆明南),20:49,0,333,¥364.0,
+KMG,G2851,Chongqing West (重庆西),15:38,Kunming South (昆明南),20:35,0,297,¥356.0,
+KMG,G3471,Chongqing West (重庆西),15:43,Kunming South (昆明南),20:49,0,306,¥352.0,
+KMG,G3473,Chongqing North (重庆北),16:21,Kunming South (昆明南),22:04,0,343,¥364.0,
+KMG,G2893,Chongqing West (重庆西),16:41,Kunming South (昆明南),21:53,0,312,¥356.0,
+KMG,G3473,Chongqing West (重庆西),16:55,Kunming South (昆明南),22:04,0,309,¥352.0,
+KMG,G2891,Chongqing North (重庆北),17:09,Kunming South (昆明南),22:48,0,339,¥364.0,
+KMG,G2881,Chongqing West (重庆西),17:31,Kunming South (昆明南),22:22,0,291,¥342.0,
+KMG,G2891,Chongqing West (重庆西),17:42,Kunming South (昆明南),22:48,0,306,¥352.0,
+KMG,K691,Chongqing West (重庆西),18:13,Kunming (昆明),06:04,1,711,¥215.0,sleeper train; price is lowest sleeper (hard sleeper)
+KMG,G2869,Chongqing West (重庆西),,Kunming South (昆明南),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+PEK,G330,Chongqing North (重庆北),07:21,Beijing West (北京西),14:31,0,430,¥834.0,
+PEK,G1150,Chongqing North (重庆北),08:15,Beijing West (北京西),17:04,0,529,¥834.0,
+PEK,G1308,Chongqing West (重庆西),08:36,Beijing Fengtai (北京丰台),20:22,0,706,¥940.0,
+PEK,T10,Chongqing West (重庆西),09:26,Beijing West (北京西),11:33,1,1567,¥389.0,sleeper train; price is lowest sleeper (hard sleeper)
+PEK,G332,Chongqing North (重庆北),14:33,Beijing West (北京西),21:44,0,431,¥856.0,
+PEK,D50,Chongqing North (重庆北),15:50,Beijing West (北京西),10:07,1,1097,¥338.0,
+PEK,D4,Chongqing North (重庆北),16:07,Beijing West (北京西),10:13,1,1086,¥348.0,
+PEK,D96,Chongqing North (重庆北),16:28,Beijing West (北京西),10:38,1,1090,¥338.0,
+PEK,D968,Chongqing West (重庆西),17:59,Beijing Fengtai (北京丰台),06:55,1,776,¥719.0,
+PEK,K508,Chongqing North (重庆北),20:14,Beijing West (北京西),21:38,1,1524,¥370.0,sleeper train; price is lowest sleeper (hard sleeper)
+PEK,G1016,Chongqing West (重庆西),,Beijing West (北京西),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+PEK,G1016,Chongqing North (重庆北),,Beijing West (北京西),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+PEK,G1198,Chongqing West (重庆西),,Beijing West (北京西),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+PEK,G1198,Chongqing North (重庆北),,Beijing West (北京西),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+PVG,D2214,Chongqing North (重庆北),07:08,Shanghai Hongqiao (上海虹桥),19:19,0,731,¥646.0,
+PVG,D2214,Chongqing North (重庆北),07:08,Shanghai South (上海南),19:49,0,761,¥653.0,
+PVG,D2270,Chongqing North (重庆北),07:24,Shanghai Hongqiao (上海虹桥),21:19,0,835,¥633.0,
+PVG,G1534,Chongqing North (重庆北),07:38,Shanghai Hongqiao (上海虹桥),19:32,0,714,¥959.0,
+PVG,D2218,Chongqing North (重庆北),07:40,Shanghai Hongqiao (上海虹桥),21:36,0,836,¥642.0,
+PVG,D2218,Chongqing North (重庆北),07:40,Shanghai South (上海南),22:14,0,874,¥649.0,
+PVG,D958,Chongqing North (重庆北),07:45,Shanghai (上海),18:25,0,640,¥640.0,
+PVG,G243,Chongqing West (重庆西),07:53,Shanghai Hongqiao (上海虹桥),16:54,0,541,¥870.0,
+PVG,K73,Chongqing North (重庆北),08:07,Shanghai Songjiang (上海松江),12:42,1,1715,¥408.0,sleeper train; price is lowest sleeper (hard sleeper)
+PVG,G1335,Chongqing West (重庆西),08:16,Jinshan North (金山北),20:36,0,740,¥889.0,
+PVG,G1335,Chongqing West (重庆西),08:16,Shanghai Hongqiao (上海虹桥),20:56,0,760,¥912.0,
+PVG,G3392,Chongqing North (重庆北),08:38,Shanghai Hongqiao (上海虹桥),18:28,0,590,¥830.0,
+PVG,D3058,Chongqing North (重庆北),08:38,Shanghai (上海),21:19,0,761,¥594.0,
+PVG,G3290,Shapingba (沙坪坝),08:51,Shanghai Hongqiao (上海虹桥),22:47,0,836,¥1114.0,
+PVG,G1478,Chongqing West (重庆西),08:55,Shanghai Hongqiao (上海虹桥),20:01,0,666,¥1027.0,
+PVG,G1976,Chongqing West (重庆西),09:22,Shanghai Hongqiao (上海虹桥),22:35,0,793,¥1177.0,
+PVG,G1478,Chongqing North (重庆北),09:27,Shanghai Hongqiao (上海虹桥),20:01,0,634,¥1010.0,
+PVG,D954,Chongqing North (重庆北),09:48,Shanghai (上海),20:21,0,633,¥651.0,
+PVG,G1473,Chongqing East (重庆东),10:40,Shanghai Hongqiao (上海虹桥),23:29,0,769,¥954.0,
+PVG,D58,Chongqing North (重庆北),14:09,Shanghai South (上海南),07:07,1,1018,¥292.0,
+PVG,D984,Chongqing North (重庆北),20:13,Shanghai Hongqiao (上海虹桥),08:04,1,711,¥544.0,
+PVG,D988,Chongqing North (重庆北),20:26,Shanghai Hongqiao (上海虹桥),08:58,1,752,¥544.0,
+PVG,D2208,Chongqing North (重庆北),,Shanghai Hongqiao (上海虹桥),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
+PVG,D354,Chongqing North (重庆北),,Shanghai Hongqiao (上海虹桥),,,,,suspended for the 2026-10-11 timetable adjustment (调图); times/fare not published
