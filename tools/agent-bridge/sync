@@ -39,7 +39,6 @@ TARGETS=(
   /Users/bsingbeil/Sites/flight-router
   /Users/bsingbeil/Sites/heat-pump
   /Users/bsingbeil/Sites/hk-imports
-  /Users/bsingbeil/Sites/polymarket-system
   /Users/bsingbeil/Sites/design
 )
 # shellcheck disable=SC2206  # word-splitting the override is the point

@@ -177,7 +177,7 @@ remember to run the check by hand. A hard-blocking `gh` alias or git hook would 
 directory**. Editing a file here changes what actually runs, everywhere, with no
 copy step — and the running version is always the committed version.
 
-Eight other repos carry a mirror of these scripts so the tooling is recoverable
+Seven other repos carry a mirror of these scripts so the tooling is recoverable
 if this checkout is lost. Those mirrors are backups, not what executes. After
 changing anything here:
 

@@ -131,19 +131,60 @@ cd "$root"
 preamble="${preamble}$(lane_context "$thread")"
 [ "$raw" -eq 1 ] || echo "── ask-claude → ${uuid} (${root}) ──" >&2
 # One caller per thread at a time — see ask-pi. Not `exec`, so the trap runs.
+#
+# mkdir success is the ONLY thing that means "I hold the lock": the pid is
+# published with a temp file + atomic `mv`, so a racer never sees a freshly-made
+# lock whose pid file is torn or absent. On a lost mkdir, only a pid file naming
+# a demonstrably dead process is reclaimed; an absent/unreadable pid means
+# someone is mid-acquisition, so back off and retry a bounded number of times
+# instead of rm -rf'ing under them. Same shape as lane's review_claim_lock
+# (task 156); ported here by task 212.
 lock="${TMPDIR:-/tmp}/agent-bridge-claude-${uuid}.lock"
-if ! mkdir "$lock" 2>/dev/null; then
-  holder="$(cat "$lock/pid" 2>/dev/null || true)"
-  if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
-    echo "ask-claude: thread '${thread}' is already in use by pid ${holder}." >&2
-    echo "            Use -t <name> for a separate thread, or claim a lane so this session gets its own." >&2
-    exit 4
+i=0
+while :; do
+  if mkdir "$lock" 2>/dev/null; then
+    # test hook (task 212): hold the mkdir→pid-write window open so the
+    # deterministic race test can prove a racer backs off and never reclaims.
+    # Gated behind AGENT_BRIDGE_TEST_MODE=1 so a stray env var in a real shell
+    # cannot silently widen the lock window.
+    if [ "${AGENT_BRIDGE_TEST_MODE:-}" = 1 ] && [ -n "${AGENT_BRIDGE_LOCK_DELAY:-}" ]; then
+      sleep "${AGENT_BRIDGE_LOCK_DELAY}"
+    fi
+    tmpfile="${lock}/pid.$$"
+    echo $$ > "$tmpfile"
+    mv "$tmpfile" "$lock/pid" 2>/dev/null || { rm -rf "$lock"; echo "ask-claude: cannot lock ${uuid}" >&2; exit 4; }
+    break
   fi
-  rm -rf "$lock"
-  mkdir "$lock" 2>/dev/null || { echo "ask-claude: cannot lock ${uuid}" >&2; exit 4; }
+  holder="$(cat "$lock/pid" 2>/dev/null || true)"
+  if [ -n "$holder" ]; then
+    if kill -0 "$holder" 2>/dev/null; then
+      echo "ask-claude: thread '${thread}' is already in use by pid ${holder}." >&2
+      echo "            Use -t <name> for a separate thread, or claim a lane so this session gets its own." >&2
+      exit 4
+    fi
+    rm -rf "$lock"                     # stale: the pid named a dead process
+    continue
+  fi
+  # pid absent/unreadable: the holder is still mid-acquisition — back off.
+  i=$((i + 1))
+  [ "$i" -le 250 ] || { echo "ask-claude: cannot lock ${uuid} (still being acquired after $i retries)" >&2; exit 4; }
+  sleep 0.02
+done
+# task 212: cleanup is EXIT-only — EXIT fires however the process exits. INT/TERM
+# must call `exit` themselves: a handler that doesn't exit RESUMES at the next
+# statement, so a bare cleanup on INT/TERM would free the lock early and then run
+# the model call anyway (the two-callers-in-one-thread race this lock exists to
+# prevent). 130/143 = 128+signal.
+trap 'rm -rf "$lock"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+# test hook (task 212): hold the post-lock window open — lock acquired, traps
+# installed — so the deterministic SIGTERM test can prove a signal actually
+# STOPS the process instead of freeing the lock early and running the bridge.
+# Gated behind AGENT_BRIDGE_TEST_MODE=1.
+if [ "${AGENT_BRIDGE_TEST_MODE:-}" = 1 ] && [ -n "${AGENT_BRIDGE_POST_LOCK_DELAY:-}" ]; then
+  sleep "${AGENT_BRIDGE_POST_LOCK_DELAY}"
 fi
-echo $$ > "$lock/pid"
-trap 'rm -rf "$lock"' EXIT INT TERM
 
 AGENT_BRIDGE_DEPTH=$((depth + 1)) claude -p \
   "${sess[@]}" \
