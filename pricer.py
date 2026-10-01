@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from candidates import FLIGHT, TRAIN, Itinerary, Leg
+import browser_pricer
 import currency
 
 
@@ -31,6 +32,7 @@ import currency
 
 USE_MOCK = False         # default: live fli pricing. Flip to True for offline dev/test.
 MAX_CONCURRENT_QUERIES = 6   # don't hammer Google Flights
+USE_BROWSER_FALLBACK = True  # when fli reports a zero price, read the price via browser_pricer.py
 
 # Transfer time penalty between flight legs (minutes).
 SAME_AIRPORT_TRANSFER_MIN = 90
@@ -140,7 +142,11 @@ def _real_fli_search(origin: str, destination: str, date: str) -> Optional[dict]
     # its decoder. Treat zero prices as "no valid result" so the leg gets
     # marked unpriceable and the itinerary gets excluded from rankings.
     # Better to show fewer options correctly than many options wrongly.
+    # If enabled, ask the browser pricer (reads the rendered Google Flights
+    # page) instead — it returns None on its own if it can't find a price.
     if not best.price or float(best.price) <= 0.0:
+        if USE_BROWSER_FALLBACK:
+            return browser_pricer.search(origin, destination, date)
         return None
 
     # Airline lives on the first leg, not the top-level result.

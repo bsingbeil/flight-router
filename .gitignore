@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 .pytest_cache/
 .fx_cache.json
+.browser_price_cache.json
 *.preview.html
 docs/superpowers/plans/.history/
 

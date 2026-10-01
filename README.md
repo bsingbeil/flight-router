@@ -39,6 +39,7 @@ flight-router/
 ├── connections.py   HSR connections from Chongqing
 ├── candidates.py    routing engine — generates candidate itineraries
 ├── pricer.py        calls fli for each leg, ranks results
+├── browser_pricer.py  backup pricer: reads Google Flights in a headless browser when fli reports C$0
 ├── currency.py      live FX rates with 24hr disk cache
 └── cli.py           terminal entry point (python cli.py CKG VIE 2026-09-15)
 ```
@@ -85,6 +86,7 @@ Takes candidate itineraries and prices them. Key features:
 - **Parallel pricing** via `ThreadPoolExecutor` (default 6 workers). Flight pricing is I/O-bound on Google's servers — threads help a lot.
 - **Leg-level cache** — when 24 candidates share legs (e.g., every "via HKG" routing has the same HKG→destination flight), each unique leg is only priced once.
 - **Mock mode** — `USE_MOCK = True` runs against a synthetic pricer based on great-circle distance. Lets the whole pipeline be tested before wiring in fli. Set to `False` for live data.
+- **Browser fallback** — when fli reports a zero price (its CNY parsing bug), `browser_pricer.py` opens the Google Flights results page in headless Chromium and reads the cheapest nonstop price from the page. Results are disk-cached for 6 hours in `.browser_price_cache.json`. Turn off with `USE_BROWSER_FALLBACK = False`.
 - **Train legs** are priced from the static fares in `connections.py`, converted to display currency at runtime.
 - **Rankings**: `rank_by_cost()` and `rank_by_duration()`. The output table shows cost, time, and a "savings/hr vs fastest" comparison column to let you see the cost/time tradeoff explicitly.
 
@@ -124,8 +126,11 @@ Requires Python 3.10+.
 
 ```bash
 cd flight-router
-pip install flights   # the fli library on PyPI
+pip install -r requirements.txt
+playwright install chromium   # one-time browser download for the fallback pricer
 ```
+
+Playwright is optional: without it, legs fli can't price are simply reported as "no flights found", same as before. Check the fallback on its own with `python browser_pricer.py HKG CKG 2026-11-15`.
 
 Add a `.gitignore` with:
 ```
