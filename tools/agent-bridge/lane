@@ -22,7 +22,7 @@ die() { echo "lane: $*" >&2; exit 1; }
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Shared session/tree/registry primitives (task 154, "shared core, not a
-# copy"): canon, tree_of, is_live, session_fields, session_by_id, short_id,
+# copy"): canon, canon_full, tree_of, is_live, session_fields, session_by_id, short_id,
 # review_only, reg_rows, lane_common_dir/lane_registry_path. `lane-guard`
 # sources the same file so the two never drift into two implementations of
 # "who is live" or "what tree is this".
@@ -92,7 +92,9 @@ holder_for() {
     [ -n "$r_claimed" ] || continue
     [ "$r_claimed" != "$me" ] || continue
     ! review_only "$r_owns" || continue   # a review claim holds a PR, not a tree (task 109)
-    [ "$(canon "$r_dir")" = "$(canon "$dir")" ] || continue
+    # canon_full, not canon: two DIFFERENT missing dirs must not collapse to a
+    # shared parent and read as the same tree (task 233).
+    [ "$(canon_full "$r_dir")" = "$(canon_full "$dir")" ] || continue
     local cpid csid ccwd cname cstatus
     IFS=$'\t' read -r cpid csid ccwd cname cstatus <<< "$(session_by_id "$r_claimed")"
     [ -n "$cpid" ] || continue
@@ -139,7 +141,7 @@ lane_who() {
   while IFS=$'\t' read -r r_name r_agent r_session r_dir r_branch r_owns r_created r_claimed; do
     [ -n "$r_name" ] || continue
     [ -n "$r_dir" ] || continue
-    [ "$(canon "$r_dir")" = "$tree" ] || continue
+    [ "$(canon_full "$r_dir")" = "$tree" ] || continue
     printf '  %-28s (agent %s, branch %s)\n' "$r_name" "$r_agent" "$r_branch"
     found=1
   done <<< "$(reg_rows)"

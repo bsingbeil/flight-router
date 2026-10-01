@@ -28,6 +28,35 @@ canon() {
   printf '%s' "$1"
 }
 
+# canon_full <path> — canon(), but for a path that does not exist yet the
+# missing tail is re-appended instead of dropped (task 233). canon() alone
+# collapses EVERY missing path under one existing parent to that same parent,
+# so two not-yet-created (or deleted) --worktree folders side by side compared
+# equal and a lane whose folder was gone held all of its siblings. Two paths
+# are equal here only when they really are the same path.
+#
+# canon() itself keeps the walk-up: tree_of() and lane-guard call it on a
+# not-yet-existing path precisely BECAUSE they want the existing ancestor, so
+# their `git -C` lands in the real work tree (a write into a brand-new
+# subdirectory must not read as "not in a work tree"). Use canon_full to
+# COMPARE two paths; use canon to LOOK something up with git.
+canon_full() {
+  local orig="$1" q="$1" tail="" p
+  p="$(cd -P "$q" 2>/dev/null && pwd -P)" && { printf '%s' "$p"; return 0; }
+  local parent
+  while [ -n "$q" ] && [ ! -d "$q" ]; do
+    tail="/$(basename "$q")${tail}"
+    parent="$(dirname "$q")"
+    [ "$parent" != "$q" ] || break   # dirname / is / — no root on disk; stop, don't spin
+    q="$parent"
+  done
+  if p="$(cd -P "$q" 2>/dev/null && pwd -P)"; then
+    printf '%s%s' "$p" "$tail"
+  else
+    printf '%s' "$orig"
+  fi
+}
+
 # tree_of <path> — canonical `git rev-parse --show-toplevel` of <path>; empty
 # when <path> is not inside a git work tree. Never fails (set -e safe).
 tree_of() {
