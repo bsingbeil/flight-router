@@ -104,3 +104,26 @@ def test_train_suggestions_none_in_time():
 
 def test_train_suggestions_need_flight_time():
     assert pricer.train_suggestions(_priced(None)) == []
+
+
+# ---------- connections.py must match the timetable ----------
+
+STATION_NAMES = {"CKG-N": "Chongqing North", "CKG-W": "Chongqing West"}
+
+
+def test_connections_match_fastest_train_in_timetable():
+    """Each route summary = the fastest non-sleeper train from its station.
+
+    If this fails after refreshing data/train_timetable.csv, re-derive the
+    numbers in connections.py (and its origin station) from the new file.
+    """
+    from connections import TRAIN_CONNECTIONS
+    trains = timetable.load_trains()
+    for c in TRAIN_CONNECTIONS:
+        regular = [t for t in trains if t.dest_code == c.destination and not t.is_sleeper]
+        fastest_overall = min(t.duration_min for t in regular
+                              if any(n in t.from_station for n in STATION_NAMES.values()))
+        from_origin = [t for t in regular if STATION_NAMES[c.origin] in t.from_station]
+        best = min(from_origin, key=lambda t: (t.duration_min, t.fare_cny))
+        assert (c.duration_min, c.cost_cny_2nd_class) == (best.duration_min, best.fare_cny), c.destination
+        assert c.duration_min == fastest_overall, f"{c.destination}: faster train from the other station"
