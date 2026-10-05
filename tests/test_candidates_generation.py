@@ -66,7 +66,7 @@ def test_one_stop_excludes_rail_nodes_as_transit_hubs():
     cands = generate_candidates("CKG", "VIE", max_stops=1, include_train=False)
     one_stops = [c for c in cands if c.num_stops == 1]
     for c in one_stops:
-        assert c.hub_codes[0] not in {"CKG-N", "HKG-WK"}
+        assert c.hub_codes[0] not in {"CKG-N", "CKG-W", "HKG-WK"}
 
 
 def test_southeast_asia_to_china_does_not_route_through_europe():
@@ -91,9 +91,9 @@ def test_train_fly_includes_train_then_flight():
     train_options = [c for c in cands if c.has_train_leg]
     assert len(train_options) >= 1
     for c in train_options:
-        # First leg must be TRAIN starting at CKG-N
+        # First leg must be TRAIN starting at a Chongqing station
         assert c.legs[0].mode == TRAIN
-        assert c.legs[0].origin == "CKG-N"
+        assert c.legs[0].origin in {"CKG-N", "CKG-W"}
         # Subsequent legs must be FLIGHT
         for leg in c.legs[1:]:
             assert leg.mode == FLIGHT

@@ -3,7 +3,7 @@ nodes.py — airports and train stations relevant to routing.
 
 A "node" is anywhere a journey can start, end, or transit. Most are airports,
 but a few are HSR stations that are useful as alternative first-leg origins
-from Chongqing (e.g. CKG-N, HKG-WK).
+from Chongqing (e.g. CKG-N, CKG-W, HKG-WK).
 
 Region values:
   CHINA            mainland China (and HSR-reachable from CKG)
@@ -57,6 +57,10 @@ NODES: dict[str, Node] = {
     "CKG-N": Node("CKG-N", "Chongqing North Railway Station", "Chongqing",
                   "China", "CHINA", "rail",
                   notes="HSR origin. Short metro from city center."),
+    "CKG-W": Node("CKG-W", "Chongqing West Railway Station", "Chongqing",
+                  "China", "CHINA", "rail",
+                  notes="HSR origin for most fast trains south/east (Guangzhou, Shenzhen, "
+                        "Hong Kong, Kunming, Shanghai). Metro Line 5 / Loop Line."),
     "HKG-WK": Node("HKG-WK", "Hong Kong West Kowloon", "Hong Kong", "Hong Kong",
                    "GREATER_CHINA", "rail",
                    notes="HSR terminus. ~30-40min to HKG airport via taxi/MTR."),
