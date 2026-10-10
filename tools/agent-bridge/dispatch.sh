@@ -59,8 +59,22 @@ message="${args[*]-}"
 [ -n "$task" ] || { echo "dispatch.sh: --task required" >&2; exit 2; }
 case "$eta" in ''|*[!0-9]*) echo "dispatch.sh: --eta must be an integer number of minutes" >&2; exit 2 ;; esac
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve a symlink chain to the real file before locating lib/: run through a
+# link in ~/bin, $BASH_SOURCE is the link, not the checkout that holds lib/.
+# Inline, because no helper can be sourced until we know where we are, and
+# portable: macOS has no `readlink -f`. The same block belongs at the top of
+# every bridge script that locates its siblings; keep the copies identical.
+_self="${BASH_SOURCE[0]}"
+while [ -L "$_self" ]; do
+  _self_dir="$(CDPATH= cd -P "$(dirname "$_self")" && pwd)"
+  _self="$(readlink "$_self")"
+  case "$_self" in /*) ;; *) _self="${_self_dir}/${_self}" ;; esac
+done
+script_dir="$(CDPATH= cd -P "$(dirname "$_self")" && pwd)"
 source "${script_dir}/lib/repo-root.sh"
+# Needed before the in-flight gate below: it converts the record's `deadline`
+# (or its mtime) to an epoch.
+source "${script_dir}/lib/portable-date.sh"
 
 # Resolve the MAIN checkout's root, not this worktree's own root — see
 # lib/repo-root.sh. ADR 0086 requires --worktree for every parallel Pi lane,
@@ -80,12 +94,14 @@ ask_pi="${script_dir}/ask-pi"
 # subshell exists, so a refusal leaves nothing behind to clean up.
 #
 # In flight means: this record has no `finished`, AND its worker is still alive.
-# A crashed worker never writes `finished`, and without the liveness check one
-# crash would hold the gate shut until a human deleted files by hand.
+# If the launching subshell itself is killed (SIGTERM/SIGHUP to it, a reboot)
+# nothing writes `finished`; without the liveness check one such loss would
+# hold the gate shut until a human deleted files by hand.
 #
 # A record with no pid yet is the half-second between dispatch.sh's first write
-# and the subshell publishing the pid — counted as in flight, deliberately: the
-# safe reading of "I can't tell yet" is "something is starting".
+# and the subshell publishing the pid. `record_in_flight` below holds it until
+# its deadline (or a day from its mtime when the deadline is unreadable), then
+# releases it — see that function for the full predicate.
 #
 # Records are machine-local and gitignored (ADR 0086), so this only ever sees
 # what is on this machine's disk. That is the whole scope of the rule.
@@ -99,17 +115,71 @@ record_field() { # <record file> <key> — our writer emits one "key": value per
     | sed -e 's/^"//' -e 's/",\{0,1\}[[:space:]]*$//' -e 's/,[[:space:]]*$//'
 }
 
+# A record is in flight when it has no `finished` AND its worker is not provably
+# gone. A live pid is the proof. A record written before the pid was known (the
+# parent writes the pid a moment later, and a crash in that window leaves it
+# null) is held only until its own `deadline`: past that a pid-less open record
+# can never prove it is alive, so it holds neither gate. A missing or unparseable
+# deadline is treated as still in flight — the safe reading of "I can't tell".
+now_epoch="$(date -u +%s)"
+file_mtime() { # <file> -> epoch seconds, empty if unavailable
+  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || true
+}
+rif_pid=""        # the effective pid the last record_in_flight() call found
+rif_reason=""     # live-pid | pidfile | young-pidless | no-deadline
+record_in_flight() { # <record file>
+  local rec="$1" finished pid dl dl_epoch pf bound
+  rif_pid=""; rif_reason=""
+  finished="$(record_field "$rec" finished)"
+  [ -z "$finished" ] || [ "$finished" = null ] || return 1
+  pid="$(record_field "$rec" pid)"
+  # A pid-less record whose worker is alive: the sibling pid file is written for
+  # the worker's whole lifetime, so use it before the deadline rule. This covers
+  # a failed pid write that left the initial (pid-less) record in place.
+  if [ -z "$pid" ] || [ "$pid" = null ]; then
+    pf="$(dirname "$rec")/.$(basename "$rec" .json).pid"
+    if [ -s "$pf" ]; then
+      pid="$(cat "$pf" 2>/dev/null || true)"
+      [ -n "$pid" ] && rif_reason="pidfile"
+    fi
+  fi
+  if [ -n "$pid" ] && [ "$pid" != null ]; then
+    if kill -0 "$pid" 2>/dev/null; then
+      rif_pid="$pid"
+      [ -n "$rif_reason" ] || rif_reason="live-pid"
+      return 0
+    fi
+    return 1                                   # worker is gone: stale record
+  fi
+  dl="$(record_field "$rec" deadline)"
+  # An empty or null deadline is not a parse failure to hand to GNU date (its
+  # `-d ""` means today's 00:00, which would release the record on Linux). A
+  # record with no readable deadline is bounded by its mtime + 24h instead, so
+  # nothing can refuse a tree forever.
+  if [ -z "$dl" ] || [ "$dl" = null ]; then
+    bound="$(file_mtime "$rec")"
+    if [ -n "$bound" ] && [ "$((bound + 86400))" -lt "$now_epoch" ]; then
+      return 1
+    fi
+    rif_reason="no-deadline"
+    return 0
+  fi
+  dl_epoch="$(epoch_from_iso "$dl")"
+  if [ -n "$dl_epoch" ] && [ "$dl_epoch" -lt "$now_epoch" ]; then
+    return 1
+  fi
+  rif_reason="young-pidless"
+  return 0
+}
+
 pi_in_flight=0          # how many Pi dispatches are live right now
 blocking_lane=""        # a live one already on THIS working tree, if any
 blocking_record=""
+blocking_pid=""
+blocking_reason=""
 while IFS= read -r rec; do
   [ -n "$rec" ] || continue
-  finished="$(record_field "$rec" finished)"
-  [ -z "$finished" ] || [ "$finished" = null ] || continue
-  pid="$(record_field "$rec" pid)"
-  if [ -n "$pid" ] && [ "$pid" != null ]; then
-    kill -0 "$pid" 2>/dev/null || continue     # worker is gone: stale record
-  fi
+  record_in_flight "$rec" || continue
   [ "$(record_field "$rec" worker)" = "pi" ] || continue
   pi_in_flight=$((pi_in_flight + 1))
   rec_tree="$(record_field "$rec" worktree)"
@@ -119,6 +189,8 @@ while IFS= read -r rec; do
   if [ -z "$rec_tree" ] || [ "$rec_tree" = null ] || [ "$rec_tree" = "$this_tree" ]; then
     blocking_lane="$(record_field "$rec" lane)"
     blocking_record="$rec"
+    blocking_pid="$rif_pid"
+    blocking_reason="$rif_reason"
   fi
 done < <(find "$dispatch_dir" -maxdepth 1 -type f -name '*.json' 2>/dev/null | sort)
 
@@ -130,6 +202,17 @@ if [ -n "$blocking_lane" ]; then
       echo "dispatch.sh: refusing — lane '${blocking_lane}' is already running against this same working tree:"
       echo "    tree:   ${this_tree}"
       echo "    record: ${blocking_record}"
+      if [ "$blocking_reason" != live-pid ]; then
+        blocking_deadline="$(record_field "$blocking_record" deadline)"
+        case "$blocking_reason" in
+          pidfile)
+            echo "    note:   the record has no pid but its worker ${blocking_pid} is alive (read from the sibling .pid file)." ;;
+          young-pidless)
+            echo "    note:   the record has no pid yet — it is younger than its deadline (${blocking_deadline}), so it is held in case the worker is still starting." ;;
+          no-deadline)
+            echo "    note:   the record has no pid and no readable deadline — held for up to a day from its last write, then released." ;;
+        esac
+      fi
       echo "  ADR 0086 makes a git worktree mandatory for every parallel Pi lane. Give this lane its own:"
       echo "    lane new ${lane} --worktree <branch> --owns <paths>"
       echo "  Or, if you have checked that it is genuinely safe: --force-shared-checkout"
@@ -155,10 +238,8 @@ if [ "$pi_in_flight" -ge "$PI_CEILING" ]; then
       echo "  for one call with --force, or for a session with DISPATCH_PI_CEILING=<n>."
       echo "  In flight:"
       find "$dispatch_dir" -maxdepth 1 -type f -name '*.json' 2>/dev/null | sort | while IFS= read -r r; do
-        f="$(record_field "$r" finished)"
-        [ -z "$f" ] || [ "$f" = null ] || continue
-        p="$(record_field "$r" pid)"
-        if [ -n "$p" ] && [ "$p" != null ]; then kill -0 "$p" 2>/dev/null || continue; fi
+        record_in_flight "$r" || continue
+        p="$rif_pid"; [ -n "$p" ] || p="$(record_field "$r" pid)"
         echo "    - $(record_field "$r" lane) (task $(record_field "$r" task), pid ${p}) in $(record_field "$r" worktree)"
       done
     } >&2
@@ -171,8 +252,6 @@ stem="${lane}-${ts}"
 log_path="${dispatch_dir}/${stem}.log"
 record_path="${dispatch_dir}/${stem}.json"
 pid_file="${dispatch_dir}/.${stem}.pid"
-
-source "${script_dir}/lib/portable-date.sh"
 
 started_epoch="$(date -u +%s)"
 started_iso="$(iso_from_epoch "$started_epoch")"
@@ -210,7 +289,13 @@ write_record() {
   [ -n "$pid" ] && [ "$pid" != "null" ] && pid_json="$pid"
   [ "$finished" != "null" ] && finished_json="\"$(json_escape "$finished")\""
   [ "$exit_code" != "null" ] && exit_json="$exit_code"
-  cat > "$record_path" <<JSON
+  # Atomic AND conditional: readers (the gate, orchestrator-count.sh, the parent's
+  # pid poll) must never see a truncated file, so the record is written to a temp
+  # and renamed into place. And a write that FAILED must not be renamed over the
+  # good record — an unconditional `mv` turned a full disk or a killed `cat` into
+  # an unreadable open record that refused the tree to every later dispatch.
+  local write_rc=0
+  if cat > "${record_path}.tmp.$$" <<JSON
 {
   "lane": "$(json_escape "$lane")",
   "task": "$(json_escape "$task")",
@@ -227,6 +312,18 @@ write_record() {
   "exit_code": ${exit_json}
 }
 JSON
+  then
+    mv -f "${record_path}.tmp.$$" "$record_path" || write_rc=$?
+  else
+    write_rc=$?
+  fi
+  if [ "$write_rc" != 0 ]; then
+    rm -f "${record_path}.tmp.$$"
+    printf 'dispatch.sh: record write failed (exit %s); previous record left intact: %s\n' \
+      "$write_rc" "$record_path" >> "$log_path" 2>/dev/null || true
+    echo "dispatch.sh: WARNING — could not write ${record_path}; previous record left intact" >&2
+    return 1
+  fi
 }
 
 # Write the initial in-flight record BEFORE launching anything, so a record
@@ -237,39 +334,54 @@ JSON
 # exits. The parent (this process) never writes the record again — that is
 # what caused the race: a fast-finishing worker's completion write used to
 # get overwritten by the parent's own trailing "in-flight" write.
+# Truncate the log once, then have the worker append: the subshell also appends
+# a failed-write line, and two independent `>` offsets would overwrite it. The
+# truncate runs before the first record write, so a failure here leaves no
+# open record behind to hold the tree.
+: > "$log_path"
 write_record "null" "null" "null"
-
-# Launch ask-pi in the background inside a detached subshell that also waits
-# on it, so the wait survives dispatch.sh itself returning. The subshell is a
-# fork of this shell, so it inherits the functions/variables above — no need
-# to redefine json_escape etc. It writes its own pid to pid_file, and to the
-# record, so the parent can report the REAL worker pid, not the subshell's.
 (
-  "$ask_pi" -t "$lane" "$message" > "$log_path" 2>&1 &
+  # This subshell's one job after launching the worker is to write the closing
+  # record, so it must reach that write after every failing command — not just
+  # status 0. It inherits `set -e` from the script, which is what broke it: a
+  # bare `wait` on a non-zero worker (ticket 263: pi exited on a 400) was a
+  # failing simple command, so the shell exited before `exit_code=$?` and before
+  # the closing write_record. The record kept "finished": null and
+  # "exit_code": null, which orchestrator-count.sh reported as DEAD on every run.
+  # Still uncovered: `set -u` is inherited (an unbound variable aborts), and a
+  # signal to this subshell is not trapped. `set +e` covers the 263 path.
+  set +e
+  "$ask_pi" -t "$lane" "$message" >> "$log_path" 2>&1 &
   worker_pid=$!
   echo "$worker_pid" > "$pid_file"
   write_record "$worker_pid" "null" "null"
-  wait "$worker_pid"
-  exit_code=$?
+  # `||` too: belt-and-braces if `set +e` above is ever removed.
+  exit_code=0
+  wait "$worker_pid" || exit_code=$?
   finished_iso="$(iso_from_epoch "$(date -u +%s)")"
   write_record "$worker_pid" "$finished_iso" "$exit_code"
   rm -f "$pid_file"
 ) &
 disown 2>/dev/null || true
 
-# Wait briefly for the subshell to publish the real worker pid, purely to
-# report it on stdout below — the record file itself is not touched here.
+# worker_pid may still be empty if the subshell hasn't scheduled yet — or because
+# the worker failed fast and the subshell already finished and removed the pid
+# file. The record carries the pid from its first write, so poll that too, and
+# treat a missing pid file as "not yet", never as a failed read: under `set -e` a
+# bare `cat` on the rm'd file aborted dispatch.sh with nothing on stdout even
+# though the worker ran and its record exists.
 worker_pid=""
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   if [ -s "$pid_file" ]; then
-    worker_pid="$(cat "$pid_file")"
-    break
+    worker_pid="$(cat "$pid_file" 2>/dev/null || true)"
   fi
+  if [ -z "$worker_pid" ]; then
+    worker_pid="$(record_field "$record_path" pid)"
+    [ "$worker_pid" = null ] && worker_pid=""
+  fi
+  [ -n "$worker_pid" ] && break
   sleep 0.2
 done
-# worker_pid may still be empty if the subshell hasn't scheduled yet — report
-# that honestly rather than falling back to "$!" (the subshell's own pid,
-# not the worker's).
 
 echo "$record_path"
 echo "$worker_pid"

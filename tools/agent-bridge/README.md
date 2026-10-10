@@ -15,12 +15,14 @@ relaying messages between them.
 | `<report-lines> \| escalate-crossing.sh <kind>` | The "tell someone" half of the counter: turns a crossing into one file per finding kind in `workspaces/coo/decisions/PENDING/`, landed on `main` through a throwaway worktree. Re-runs update that file rather than piling up duplicates. Called by `orchestrator-count.sh`, not by hand. |
 | `ask-rawls --ask <task-slug>:<blocker-slug> "<question>" [--live]` | Dispatcher → Rawls. One fresh Fable call per ask on the Claude plan, capped at $6 per call (two calls per key, so $12 per question), fanned out in parallel, reading only a snapshot of `main`'s record. A cited ruling lands in `workspaces/rawls/ANSWERS.md` on `main`; an uncited question comes back as residue (`--live`) or goes to `PENDING/`. Two calls per issue key, then a human. **Refuses executors** (Pi sessions, bridge chains) and is deliberately **not** linked into `~/bin`. Procedure: `.claude/skills/dispatcher-blocked/`. |
 | `check-task-filed.sh [--range <git-range>] [--count]` | Pre-merge gate — fails if a `tasks/inbox/*.md` file is `status: done` but hasn't been moved to `tasks/done/`. `--count` prints a bare count (then offending paths) for `orchestrator-count.sh` to consume, instead of parsing prose. |
+| `frontier-ready.sh [--branch <ref>] [--series <spec>]` | The frontier's ready list: prints the tasks the orchestrator may dispatch, one `NNN-slug` per line, most-direct-dependents first. A task is ready when it is in `tasks/inbox/`, its `status: queued`, every `blocked-by` (inline or block-style) names a `done` task, and its `_planning/<series>-YYYY-MM-DD.md` spec has an `## Approved` line carrying a signed `YYYY-MM-DD` date (a template placeholder, HTML comment, or fenced block never counts). `--branch` reads a named ref without checking it out; `--series` limits to one spec (zero or several matching files is an error). Exit codes follow `orchestrator-count.sh`: `0` clean list, `2` graph error found and reported (cycle, dangling or bare-number `blocked-by`, ambiguous spec, one task stem in both `tasks/inbox/` and `tasks/done/`), `1` could not read (including a ref with no `tasks/inbox`), `64` bad usage. |
 | `health-check.sh [--update-baseline]` | The weekly health check (task 079), rebuilt model-free: deno lint/check/test over `supabase/functions`, Supabase advisors diffed against a committed baseline (`health-baseline.txt`), and a pipeline snapshot (shipment legs, alerts, unacked notifications, the two tracking cron jobs). Writes a dated report to `HEALTH_REPORT_DIR` (default `~/Library/Logs/navigate-ops/health/`, never committed). Own exit codes: `0` clean/watch, `2` a real RED AND the PENDING escalation landed, `1` a check could not run at all OR a RED's PENDING write failed (could-not-report is the same bucket as could-not-run — that distinction is the whole point of task 079), `64` bad usage. A RED lands one `workspaces/coo/decisions/PENDING/health-check.md`, same dedupe shape as the counter's crossings. Run under `run-job.sh`, which maps `2` to a clean launchd status. |
 | `launchd/run-job.sh <repo-relative-script> [args...]` | What every `com.navigate*` launchd job actually invokes (task 036). Refreshes the dedicated jobs checkout (`~/Sites/navigate-ops-jobs`, gitignored from this repo, a `git worktree` detached at `origin/main`) to `origin/main`, refuses to run against it if it's missing or dirty, then runs the named script relative to it (not `exec` — it stays alive to translate the exit code). **The exit-code contract**, so `launchctl list`'s status column can't conflate "found something and reported it" with a crash: target exit `0` → `0`; target exit `2` (ran, found something, reported it successfully) → `0`, logged as `findings reported (rc 2)`; anything else (could not run, or ran but could not report) → passed through unchanged, which is what `failing-launchd-jobs` (arm 5 of `orchestrator-count.sh`) watches for. Never run by hand outside a test — see `launchd/INSTALL.md`. |
 
-`dispatch.sh`, `orchestrator-count.sh`, `escalate-crossing.sh`, and
-`check-task-filed.sh` carry a `.sh` extension and are invoked by path, unlike `ask-pi` / `ask-claude` / `lane` /
-`sync` above, which are extensionless commands symlinked into `~/bin`. `lane-guard` is extensionless like those,
+`dispatch.sh`, `orchestrator-count.sh`, `escalate-crossing.sh`, `check-task-filed.sh`, and
+`frontier-ready.sh` carry a `.sh` extension and are invoked by path, unlike `ask-pi` / `ask-claude` / `lane`
+above, which are extensionless commands symlinked into `~/bin` (`sync` is extensionless too but is run by its
+repo path, not linked). `lane-guard` is extensionless like those,
 but is **not** symlinked into `~/bin` either: it is a Claude Code hook, invoked by path from
 `.claude/settings.json` (`"$CLAUDE_PROJECT_DIR"/tools/agent-bridge/lane-guard pre`), so every worktree runs its
 own checkout's copy. That's
@@ -174,8 +176,18 @@ remember to run the check by hand. A hard-blocking `gh` alias or git hook would 
 ## This directory is the canonical copy
 
 `~/bin/ask-pi`, `~/bin/ask-claude` and `~/bin/lane` are **symlinks into this
-directory**. Editing a file here changes what actually runs, everywhere, with no
-copy step — and the running version is always the committed version.
+directory**. Editing a file here is the edit that reaches the command — no copy
+step. They are **safe to symlink**: every script here that loads a sibling
+file (the `lib/` helpers, `ask-pi`, `review-prompts/`, `scripts/lib/`) resolves
+its own symlinks before it looks for that sibling, and `ask-pi` / `ask-claude`
+load no helpers, so no `lib` link is needed next to the link in `~/bin`.
+
+What runs is **not** "the committed version" — it is the copy in whichever
+checkout `~/bin` points at, on whatever branch that checkout is parked on.
+`~/bin/lane` today points into the shared `~/Sites/navigate-ops` checkout, which
+is not guaranteed to be on `main`; merging a fix here does not change the command
+until that checkout carries it. As of 2026-10-10 the hand-made `~/bin/lib` link
+must stay until then (removing it is task 286).
 
 Seven other repos carry a mirror of these scripts so the tooling is recoverable
 if this checkout is lost. Those mirrors are backups, not what executes. After

@@ -20,7 +20,18 @@
 # SYNC_TARGETS (space-separated paths) replaces the target list — for tests.
 set -euo pipefail
 
-SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve a symlink chain to the real file before locating lib/: run through a
+# link in ~/bin, $BASH_SOURCE is the link, not the checkout that holds lib/.
+# Inline, because no helper can be sourced until we know where we are, and
+# portable: macOS has no `readlink -f`. The same block belongs at the top of
+# every bridge script that locates its siblings; keep the copies identical.
+_self="${BASH_SOURCE[0]}"
+while [ -L "$_self" ]; do
+  _self_dir="$(CDPATH= cd -P "$(dirname "$_self")" && pwd)"
+  _self="$(readlink "$_self")"
+  case "$_self" in /*) ;; *) _self="${_self_dir}/${_self}" ;; esac
+done
+SRC="$(CDPATH= cd -P "$(dirname "$_self")" && pwd)"
 # Generic bridge tooling only. orchestrator-count.sh and check-task-filed.sh
 # are deliberately NOT here: both hardcode navigate-ops' tasks/inbox +
 # tasks/done layout and its PR conventions, so a mirror target would end up
