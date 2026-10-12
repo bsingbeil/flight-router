@@ -13,6 +13,15 @@
 #   lane reviews 154      # pre-merge check: list claims of pr/154 + STATE
 #   lane ls
 #   lane rm scraper
+#   lane prune [--apply] [--all]   # list lanes nobody holds; --apply drops their rows
+#
+# `lane prune` lists a lane whose session is not live and whose branch is
+# merged into origin/main, whose branch is gone, or whose worktree folder is
+# missing. A Pi lane (state unknown) is listed only when its branch or its
+# worktree folder is gone — a merged branch alone is not enough, because its
+# liveness cannot be observed. A live lane is never listed; `--all` also shows
+# the lanes it keeps and why. `--apply` removes the listed registry rows only,
+# never a worktree or a branch (it prints the `git worktree remove` hint).
 #
 # The registry lives in the repo's shared git dir, so every worktree of the
 # same repo sees the same lanes. It is never committed.
@@ -190,6 +199,191 @@ lane_rm() {
   grep -q "^${target}$(printf '\t')" "$REG" || die "no lane named '$target'"
   tmp="$(mktemp)"; grep -v "^${target}$(printf '\t')" "$REG" > "$tmp"; mv "$tmp" "$REG"
   echo "released lane '$target' (any git worktree it used is left in place — remove with: git worktree remove <path>)"
+}
+
+# lane_usage — print this file's leading comment block as help. Reads the `#`
+# lines after the shebang and stops at the first non-comment, so a new
+# command's help line does not mean editing a line count here.
+lane_usage() {
+  awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$0"
+}
+
+# lane prune [--apply] [--all] — list the lanes nobody holds and, with --apply,
+# remove exactly those registry rows. A lane is listed only when its session is
+# not live AND one of:
+#
+#   - its branch tip is an ancestor of origin/main as last fetched (STALE
+#     lanes only: a Pi lane's liveness is not observable, so a merged branch
+#     alone must never remove it);
+#   - its branch no longer exists;
+#   - its worktree folder is missing.
+#
+# A live lane is never listed. `--all` also lists the lanes it keeps and why.
+# A branch that IS the default branch is never called merged (it is trivially
+# merged into itself). `--apply` removes registry rows only, the way `lane rm`
+# does — never a worktree, never a branch.
+lane_prune() {
+  local apply=0 all=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --apply) apply=1; shift ;;
+      --all)   all=1; shift ;;
+      -h|--help) lane_usage; return 0 ;;
+      *) die "usage: lane prune [--apply] [--all]" ;;
+    esac
+  done
+
+  local main_sha default_branch root
+  git rev-parse --verify --quiet origin/main >/dev/null 2>&1 \
+    || die "origin/main not found — fetch first; prune compares against origin/main as last fetched"
+  main_sha="$(git rev-parse --short origin/main)"
+  # The MAIN checkout, not this worktree: sessions normally run from a linked
+  # worktree, and the shared main checkout's dirt must not be attributed to a
+  # worktree-lane row — nor a worktree-lane row skipped because it IS this
+  # worktree. agent_bridge_root resolves git-common-dir, the same anchor
+  # `lane new --worktree` uses (a `--show-toplevel` here would be the invoking
+  # worktree's root, which is exactly the wrong tree).
+  root="$(agent_bridge_root 2>/dev/null)" || root=""
+  [ -n "$root" ] || root="$(git rev-parse --show-toplevel)"
+  root="$(canon_full "$root")"
+  # The default branch can never be "merged into itself". Resolve its name from
+  # origin/HEAD; fall back to main when origin/HEAD is not set.
+  default_branch="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)" || default_branch=""
+  default_branch="${default_branch#origin/}"
+  [ -n "$default_branch" ] || default_branch="main"
+
+  echo "lane prune: comparing against origin/main (${main_sha}, as last fetched)"
+  printf '%-28s %-7s %-7s %-24s %s\n' NAME AGENT STATE BRANCH REASON
+
+  # Tab is IFS *whitespace* in bash, so `read` collapses a row whose `owns`
+  # field is empty (`lane new foo` with no --owns) and shifts every later field
+  # left — a live Claude lane then reads as `unknown` and can be pruned. Swap the
+  # separator for a non-whitespace control character so an empty field stays a
+  # field. (The same collapse lives in `lane ls`/`holder_for`; fixing those is a
+  # separate change — prune is the one that acts destructively on the parse.)
+  local rows; rows="$(reg_rows | tr '\t' '\037')"
+  local r_name r_agent r_session r_dir r_branch r_owns r_created r_claimed
+  local cand_names="" n=0
+  while IFS=$'\037' read -r r_name r_agent r_session r_dir r_branch r_owns r_created r_claimed; do
+    [ -n "$r_name" ] || continue
+    local state reasons="" keep="" branch_exists=0 no_branch=0 merged=0
+    local dir_exists=0 dirty=0
+    state="$(claimant_state "$r_claimed" "$r_agent")"
+    [ "$state" = live ] && continue
+    # One review per PR (task 109): a lane that owns ANY pr/<n> claims a review —
+    # the same predicate `lane reviews` and merge-pr.sh use — and a review claim
+    # is never auto-removed; it is cancelled explicitly with `lane rm`. Pruning it
+    # would silently open merge-pr.sh's "no review outstanding" gate. `review_only`
+    # (all-pr owns) is too narrow: a mixed `--owns pr/154 --owns tools/x` still
+    # locks pr/154.
+    case " ${r_owns//,/ } " in
+      *" pr/"*)
+        [ "$all" = 1 ] && printf '%-28s %-7s %-7s %-24s %s\n' "$r_name" "$r_agent" "$state" "$r_branch" \
+          "kept: review claim — cancel with \`lane rm $r_name\` first"
+        continue ;;
+    esac
+    case "$r_branch" in ""|HEAD) no_branch=1 ;; esac
+    if [ "$no_branch" = 0 ] && git show-ref --verify --quiet "refs/heads/$r_branch"; then branch_exists=1; fi
+    if [ -n "$r_dir" ] && [ -d "$r_dir" ]; then dir_exists=1; fi
+    # "Merged" is the branch tip being an ancestor of origin/main. `main` itself
+    # and the origin/HEAD branch are never called merged: they are trivially
+    # merged into themselves, and origin/HEAD is not guaranteed to name main.
+    if [ "$no_branch" = 0 ] && [ "$branch_exists" = 1 ] \
+       && [ "$r_branch" != main ] && [ "$r_branch" != "$default_branch" ] \
+       && git merge-base --is-ancestor "refs/heads/$r_branch" origin/main 2>/dev/null; then
+      # Only now is dirt relevant. A linked worktree with uncommitted work is not
+      # "merged": `lane new --worktree` points the branch at the current HEAD, so
+      # until the first commit the tip IS origin/main. --no-optional-locks: prune
+      # is read-only and must not drop an index.lock in a worktree a live worker
+      # may be using.
+      if [ "$dir_exists" = 1 ] && [ "$(canon_full "$r_dir")" != "$root" ] \
+         && [ -n "$(git --no-optional-locks -C "$r_dir" status --porcelain 2>/dev/null)" ]; then
+        dirty=1
+      else
+        merged=1
+      fi
+    fi
+    # Conservative for Pi: its liveness is not observable — state `unknown`, or a
+    # `--agent pi` row whose Claude claimant's session file has gone stale while
+    # the Pi worker may still run. A merged branch alone never lists such a lane.
+    if [ "$state" = unknown ] || [ "$r_agent" = pi ]; then
+      [ "$no_branch" = 0 ] && [ "$branch_exists" = 0 ] && reasons="${reasons}branch no longer exists; "
+      [ "$dir_exists" = 0 ] && reasons="${reasons}worktree folder missing; "
+    else
+      [ "$merged" = 1 ] && reasons="${reasons}branch merged into origin/main; "
+      [ "$no_branch" = 0 ] && [ "$branch_exists" = 0 ] && reasons="${reasons}branch no longer exists; "
+      [ "$dir_exists" = 0 ] && reasons="${reasons}worktree folder missing; "
+    fi
+    if [ -n "$reasons" ]; then
+      reasons="${reasons%; }"
+      printf '%-28s %-7s %-7s %-24s %s\n' "$r_name" "$r_agent" "$state" "$r_branch" "$reasons"
+      if [ -z "$cand_names" ]; then cand_names="$r_name"; else cand_names="${cand_names}
+${r_name}"; fi
+      n=$((n + 1))
+    elif [ "$all" = 1 ]; then
+      if [ "$no_branch" = 1 ]; then
+        keep="kept: no branch recorded (detached HEAD)"
+      elif [ "$dirty" = 1 ]; then
+        keep="kept: worktree has uncommitted changes"
+      elif [ "$r_branch" = "$default_branch" ]; then
+        keep="kept: '${r_branch}' is the default branch — never treated as merged"
+      elif [ "$state" = unknown ] || [ "$r_agent" = pi ]; then
+        keep="kept: Pi lane (state unknown) — a merged branch alone is not enough"
+      else
+        keep="kept: branch unmerged and worktree exists"
+      fi
+      printf '%-28s %-7s %-7s %-24s %s\n' "$r_name" "$r_agent" "$state" "$r_branch" "$keep"
+    fi
+  done <<< "$rows"
+
+  if [ "$apply" = 1 ] && [ "$n" -gt 0 ]; then
+    local tmp names cname dupes reg_mode=""
+    # Temp file beside the registry, so `mv` is an atomic same-filesystem replace
+    # (a $TMPDIR temp could be cross-device, and lane-guard reads this file on
+    # every write).
+    # ponytail: still an unlocked read-modify-write shared with `lane rm`; a
+    # concurrent `lane new` append inside the tiny window can be lost.
+    tmp="$(mktemp "${REG}.XXXXXX")" || die "could not create a temp registry beside $REG"
+    # Read the registry's mode numerically: `stat -c` on Linux, `stat -f` on
+    # macOS. A symbolic `ls -l` string carries an ACL marker ("-rw-r--r--@")
+    # that chmod refuses, so it must never be fed to chmod.
+    reg_mode="$(stat -c '%a' "$REG" 2>/dev/null)" || reg_mode=""
+    [ -n "$reg_mode" ] || reg_mode="$(stat -f '%Lp' "$REG" 2>/dev/null)" || reg_mode=""
+    names="$(mktemp)" || { rm -f "$tmp"; die "could not create a temp name list"; }
+    printf '%s\n' "$cand_names" > "$names"
+    # Two rows with one candidate name mean the check-then-append gate was
+    # bypassed; dropping both would not be "exactly the listed rows".
+    dupes="$(awk -F'\t' 'NR==FNR { k[$1]=1; next } ($1 in k) { c[$1]++ } END { for (n in c) if (c[n] > 1) print n }' "$names" "$REG")"
+    if [ -n "$dupes" ]; then
+      rm -f "$tmp" "$names"
+      die "registry has duplicate rows for: $(printf '%s' "$dupes" | tr '\n' ' ')— resolve by hand before --apply"
+    fi
+    # Drop exactly the listed rows, the way `lane rm` does: registry only.
+    if ! awk -F'\t' 'NR==FNR { k[$1]=1; next } !($1 in k)' "$names" "$REG" > "$tmp"; then
+      rm -f "$tmp" "$names"
+      die "could not rewrite the registry"
+    fi
+    # mktemp creates the file 0600; keep the registry's own mode across the
+    # replace. A failure here is not hidden: the mode would silently change.
+    if [ -n "$reg_mode" ]; then
+      chmod "$reg_mode" "$tmp" \
+        || echo "lane: warning: could not set mode $reg_mode on $tmp — $REG may change mode" >&2
+    else
+      echo "lane: warning: could not read the mode of $REG — it may change mode across --apply" >&2
+    fi
+    mv "$tmp" "$REG"
+    rm -f "$names"
+    while IFS= read -r cname; do
+      [ -n "$cname" ] || continue
+      echo "released lane '$cname' (any git worktree it used is left in place — remove with: git worktree remove <path>)"
+    done <<< "$cand_names"
+    return 0
+  fi
+  if [ "$n" -gt 0 ]; then
+    echo "$n lane(s) would be pruned; re-run with --apply to remove their registry rows"
+  else
+    echo "no lanes to prune"
+  fi
 }
 
 # Warn when a new lane's paths overlap one already claimed. Prefix match both
@@ -526,6 +720,7 @@ case "${1-}" in
   who)     shift; lane_who "$@" ;;
   ls|"")   lane_ls ;;
   rm)      shift; lane_rm "$@" ;;
-  -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//' ;;
-  *)     die "unknown command '${1}' (new | review | reviews | who | ls | rm)" ;;
+  prune)   shift; lane_prune "$@" ;;
+  -h|--help) lane_usage ;;
+  *)     die "unknown command '${1}' (new | review | reviews | who | ls | rm | prune)" ;;
 esac

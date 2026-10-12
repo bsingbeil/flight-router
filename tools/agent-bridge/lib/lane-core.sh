@@ -10,8 +10,9 @@
 #                   lane_common_dir below) for reg_rows().
 #
 # Nothing in here writes to $REG — only `lane`'s own commands (lane new,
-# lane rm) do that. lane_notify_holder is the one function here that writes
-# anything, and it writes to the lane-notices/ directory, never the registry.
+# lane rm, lane prune --apply) do that. lane_notify_holder is the one function
+# here that writes anything, and it writes to the lane-notices/ directory, never
+# the registry.
 
 # canon <path> — canonical absolute path (symlinks resolved), so /private/tmp
 # vs /tmp or any symlink cannot make two paths for one tree look different.
