@@ -17,11 +17,13 @@
 #
 # `lane prune` lists a lane whose session is not live and whose branch is
 # merged into origin/main, whose branch is gone, or whose worktree folder is
-# missing. A Pi lane (state unknown) is listed only when its branch or its
-# worktree folder is gone — a merged branch alone is not enough, because its
-# liveness cannot be observed. A live lane is never listed; `--all` also shows
-# the lanes it keeps and why. `--apply` removes the listed registry rows only,
-# never a worktree or a branch (it prints the `git worktree remove` hint).
+# missing. A Pi lane (state unknown) is judged by its dispatch records, through
+# the one "in flight" predicate dispatch.sh's ceiling reads (ticket 329): it is
+# kept while a worker is in flight, and otherwise listed like a STALE lane, with
+# the reason saying whether it has no dispatch in flight or no record at all.
+# A live lane is never listed; `--all` also shows the lanes it keeps and why.
+# `--apply` removes the listed registry rows only, never a worktree or a branch
+# (it prints the `git worktree remove` hint).
 #
 # The registry lives in the repo's shared git dir, so every worktree of the
 # same repo sees the same lanes. It is never committed.
@@ -50,6 +52,12 @@ source "${script_dir}/lib/lane-core.sh"
 # task 200: the shared main-checkout root (dirname of the git-common-dir), so
 # `lane new --worktree` puts the worktree in one place however it was invoked.
 source "${script_dir}/lib/repo-root.sh"
+# ticket 329: `lane prune` judges a Pi lane by its dispatch records, so it reads
+# the ONE "in flight" predicate (ticket 341) dispatch.sh's two gates and
+# `ticket.sh workers` read — never a second rule. in-flight.sh converts a
+# record's deadline with epoch_from_iso, so portable-date.sh comes first.
+source "${script_dir}/lib/portable-date.sh"
+source "${script_dir}/lib/in-flight.sh"
 
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not inside a git repo"
 common="$(lane_common_dir)"
@@ -196,6 +204,12 @@ lane_ls() {
 
 lane_rm() {
   local target="${1:?usage: lane rm <name>}" tmp
+  # ticket 344: the same one registry lock as `lane new` and `lane prune
+  # --apply`. The grep and the rewrite below are ONE read-modify-write, and an
+  # append landing between them is lost by the rewrite (it reads, then replaces
+  # the whole file with its own snapshot).
+  lane_locks_arm
+  registry_lock
   grep -q "^${target}$(printf '\t')" "$REG" || die "no lane named '$target'"
   tmp="$(mktemp)"; grep -v "^${target}$(printf '\t')" "$REG" > "$tmp"; mv "$tmp" "$REG"
   echo "released lane '$target' (any git worktree it used is left in place — remove with: git worktree remove <path>)"
@@ -212,11 +226,15 @@ lane_usage() {
 # remove exactly those registry rows. A lane is listed only when its session is
 # not live AND one of:
 #
-#   - its branch tip is an ancestor of origin/main as last fetched (STALE
-#     lanes only: a Pi lane's liveness is not observable, so a merged branch
-#     alone must never remove it);
+#   - its branch tip is an ancestor of origin/main as last fetched (a Pi lane
+#     counts too once no dispatch record for it is in flight — ticket 329);
 #   - its branch no longer exists;
 #   - its worktree folder is missing.
+#
+# A Pi lane is judged from the dispatch records: a record in flight keeps it
+# whatever the branch says, and no dispatch in flight (or no record at all)
+# makes it an ordinary dead lane. "In flight" is lib/in-flight.sh's
+# record_in_flight, the same predicate dispatch.sh's ceiling uses.
 #
 # A live lane is never listed. `--all` also lists the lanes it keeps and why.
 # A branch that IS the default branch is never called merged (it is trivially
@@ -233,6 +251,17 @@ lane_prune() {
     esac
   done
 
+  # ticket 344: --apply is a read-modify-write of the registry — the scan below
+  # IS the read and the tmp+mv rewrite is the write — so one lock spans both,
+  # the same lock `lane new` (check-then-append) and `lane rm`
+  # (grep-then-rewrite) take. Without it, a `lane new` append can land inside
+  # that window and be dropped by the rewrite. A plain listing writes nothing
+  # and takes no lock.
+  if [ "$apply" = 1 ]; then
+    lane_locks_arm
+    registry_lock
+  fi
+
   local main_sha default_branch root
   git rev-parse --verify --quiet origin/main >/dev/null 2>&1 \
     || die "origin/main not found — fetch first; prune compares against origin/main as last fetched"
@@ -246,6 +275,11 @@ lane_prune() {
   root="$(agent_bridge_root 2>/dev/null)" || root=""
   [ -n "$root" ] || root="$(git rev-parse --show-toplevel)"
   root="$(canon_full "$root")"
+  # The dispatch records live in the MAIN checkout (dispatch.sh resolves the same
+  # path), so a Pi lane is judged from the same records whichever worktree this
+  # runs in. A missing folder just means no records — every Pi lane reads as
+  # "no dispatch record", not as an error.
+  local dispatch_dir="${root}/.claude/dispatch"
   # The default branch can never be "merged into itself". Resolve its name from
   # origin/HEAD; fall back to main when origin/HEAD is not set.
   default_branch="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)" || default_branch=""
@@ -267,7 +301,7 @@ lane_prune() {
   while IFS=$'\037' read -r r_name r_agent r_session r_dir r_branch r_owns r_created r_claimed; do
     [ -n "$r_name" ] || continue
     local state reasons="" keep="" branch_exists=0 no_branch=0 merged=0
-    local dir_exists=0 dirty=0
+    local dir_exists=0 dirty=0 in_flight=0 pi_case="" rec recs=0
     state="$(claimant_state "$r_claimed" "$r_agent")"
     [ "$state" = live ] && continue
     # One review per PR (task 109): a lane that owns ANY pr/<n> claims a review —
@@ -303,17 +337,46 @@ lane_prune() {
         merged=1
       fi
     fi
-    # Conservative for Pi: its liveness is not observable — state `unknown`, or a
-    # `--agent pi` row whose Claude claimant's session file has gone stale while
-    # the Pi worker may still run. A merged branch alone never lists such a lane.
+    # A Pi lane is judged by its dispatch records (ticket 329, Brendan 2026-10-12):
+    # `state unknown`, or a `--agent pi` row whose Claude claimant has gone stale,
+    # says nothing about the worker — the records do. "In flight" is the one
+    # shared predicate, so prune can never disagree with the ceiling.
+    # The glob first, the record's own `lane` field second: the glob is the
+    # `<lane>-<ts>.json` naming convention every reader uses and costs no fork, so
+    # only this lane's records are read (a folder of hundreds of records is not
+    # re-scanned per row while --apply holds the registry lock — review round 2,
+    # F1), and the field check means a `foo` row cannot borrow `foo-bar-*`.
     if [ "$state" = unknown ] || [ "$r_agent" = pi ]; then
-      [ "$no_branch" = 0 ] && [ "$branch_exists" = 0 ] && reasons="${reasons}branch no longer exists; "
-      [ "$dir_exists" = 0 ] && reasons="${reasons}worktree folder missing; "
-    else
-      [ "$merged" = 1 ] && reasons="${reasons}branch merged into origin/main; "
-      [ "$no_branch" = 0 ] && [ "$branch_exists" = 0 ] && reasons="${reasons}branch no longer exists; "
-      [ "$dir_exists" = 0 ] && reasons="${reasons}worktree folder missing; "
+      for rec in "$dispatch_dir/${r_name}-"*.json; do
+        [ -f "$rec" ] || continue
+        [ "$(record_field "$rec" lane)" = "$r_name" ] || continue
+        recs=$((recs + 1))
+        if record_in_flight "$rec"; then
+          in_flight=1
+          pi_case="a worker is in flight ($(basename "$rec"))"
+          break
+        fi
+      done
+      if [ "$in_flight" = 0 ]; then
+        if [ "$recs" -gt 0 ]; then pi_case="no dispatch in flight"; else pi_case="no dispatch record"; fi
+      fi
     fi
+    # A Pi lane whose worker is in flight is kept whatever its branch says —
+    # the one Pi case a merged branch does not clear.
+    if [ "$in_flight" = 1 ]; then
+      [ "$all" = 1 ] && printf '%-28s %-7s %-7s %-24s %s\n' "$r_name" "$r_agent" "$state" "$r_branch" \
+        "kept: Pi lane — ${pi_case}"
+      continue
+    fi
+    # Past the in-flight case a Pi lane is judged exactly like a STALE one — the
+    # merged-and-clean case counts beside the two it already had — so there is
+    # one set of reasons, not two that must stay equal.
+    [ "$merged" = 1 ] && reasons="${reasons}branch merged into origin/main; "
+    [ "$no_branch" = 0 ] && [ "$branch_exists" = 0 ] && reasons="${reasons}branch no longer exists; "
+    [ "$dir_exists" = 0 ] && reasons="${reasons}worktree folder missing; "
+    # Only annotate a line that already has a listing reason: a kept lane's own
+    # case is added to its `--all` line below, never turned into a reason.
+    if [ -n "$reasons" ] && [ -n "$pi_case" ]; then reasons="${reasons}(${pi_case}); "; fi
     if [ -n "$reasons" ]; then
       reasons="${reasons%; }"
       printf '%-28s %-7s %-7s %-24s %s\n' "$r_name" "$r_agent" "$state" "$r_branch" "$reasons"
@@ -328,10 +391,11 @@ ${r_name}"; fi
       elif [ "$r_branch" = "$default_branch" ]; then
         keep="kept: '${r_branch}' is the default branch — never treated as merged"
       elif [ "$state" = unknown ] || [ "$r_agent" = pi ]; then
-        keep="kept: Pi lane (state unknown) — a merged branch alone is not enough"
+        keep="kept: Pi lane"
       else
         keep="kept: branch unmerged and worktree exists"
       fi
+      [ -n "$pi_case" ] && keep="${keep} — ${pi_case}"
       printf '%-28s %-7s %-7s %-24s %s\n' "$r_name" "$r_agent" "$state" "$r_branch" "$keep"
     fi
   done <<< "$rows"
@@ -341,8 +405,8 @@ ${r_name}"; fi
     # Temp file beside the registry, so `mv` is an atomic same-filesystem replace
     # (a $TMPDIR temp could be cross-device, and lane-guard reads this file on
     # every write).
-    # ponytail: still an unlocked read-modify-write shared with `lane rm`; a
-    # concurrent `lane new` append inside the tiny window can be lost.
+    # The registry lock, taken by lane_prune when --apply was parsed, covers this
+    # whole scan→rewrite: see lane_mkdir_lock's callers and the lock's own note.
     tmp="$(mktemp "${REG}.XXXXXX")" || die "could not create a temp registry beside $REG"
     # Read the registry's mode numerically: `stat -c` on Linux, `stat -f` on
     # macOS. A symbolic `ls -l` string carries an ACL marker ("-rw-r--r--@")
@@ -436,16 +500,72 @@ check_review_claim() {
   return 0
 }
 
-# review_claim_lock <pr> — the mkdir lock for pr/<n>, ask-pi's thread-lock shape
-# (task 156). mkdir success is the ONLY thing that ever means "I hold the lock":
-# the pid is published with a temp-file + mv (atomic on one filesystem), so a
-# racer never sees a freshly-made lock whose pid file is torn or absent. On a
-# lost mkdir, only a pid file that names a demonstrably dead process is
-# reclaimed; an absent/unreadable pid means someone is mid-acquisition, so we
-# back off and retry a bounded number of times instead of rm -rf'ing under them.
-review_claim_lock() {
-  local pr="$1" lock pidfile holder tmpfile i=0
-  lock="${common}/.lane-review-${pr}.lock"
+# lane_locks_arm — install the lock-release traps ONCE, before the first lock is
+# taken. Deliberately NOT a `local` holder: the EXIT trap fires after the
+# function that took the lock has returned, and a local would be out of scope by
+# then — the trap would see an empty string and release nothing. Do not make
+# lane_lockdirs local anywhere; that silently reintroduces the lock leak task
+# 156 closed. Cleanup is EXIT-only — EXIT fires however the process exits, and
+# it reads ${lane_lockdirs} at fire time, so every lock grabbed (a later one in a
+# multi-pr --owns list, or the registry lock) is released even on a mid-loop
+# refusal. INT/TERM must call `exit` themselves: a trap handler that doesn't
+# exit RESUMES at the next statement after the signal, so a bare cleanup trap on
+# INT/TERM would free the lock early and then keep running to append the row
+# (the two-winners race task 156 closes, reopened through Ctrl-C).
+# 130/143 = 128+signal.
+# lane_lockdirs is one lock path per LINE, never space-separated: the shared git
+# dir can contain a space (`/Users/x/My Repo/.git`), and word-splitting it in the
+# trap would `rm -rf` an unrelated path and leave the lock held (review of ticket
+# 344, round 2 F3 — this trap now runs on every registry write, not only on a
+# review claim).
+lane_lockdirs=""
+# Set by `lane new` (ticket 344, round 2 F2): the worktree this run created, the
+# branch it created, and whether the registry row landed. lane_locks_release uses
+# them to remove a worktree that a refused claim left behind with no row.
+lane_created_wt=""
+lane_created_branch=""
+lane_wrote_row=0
+lane_locks_arm() {
+  lane_lockdirs=""
+  trap 'lane_locks_release' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}
+
+# lane_locks_release — every lock this run took, then (ticket 344, round 2 F2)
+# the worktree a FAILED `lane new --worktree` created but never registered. That
+# run's late lock or duplicate check can refuse after the checkout, and nothing
+# else knows the worktree exists; the branch is deleted only when this run made
+# it. lane_wrote_row is set the instant the registry row is appended.
+lane_locks_release() {
+  local l
+  while IFS= read -r l; do
+    [ -n "$l" ] && rm -rf "$l" 2>/dev/null
+  done <<< "$lane_lockdirs"
+  [ -n "${lane_created_wt:-}" ] || return 0
+  [ "${lane_wrote_row:-0}" = 1 ] && return 0
+  if git worktree remove --force "$lane_created_wt" 2>/dev/null; then
+    echo "lane: removed the worktree ${lane_created_wt}, which this failed claim had created" >&2
+    [ -n "${lane_created_branch:-}" ] && git branch -D "$lane_created_branch" >/dev/null 2>&1
+  else
+    echo "lane: ${lane_created_wt} was created by this failed claim and is still there — remove it with: git worktree remove ${lane_created_wt}" >&2
+  fi
+  return 0
+}
+
+# lane_mkdir_lock <lockdir> <label> [wait] — the mkdir lock shape task 156 built
+# for pr/<n>, reused by ticket 344 for the registry: mkdir success is the ONLY
+# thing that ever means "I hold the lock"; the pid is published with a temp-file
+# + mv (atomic on one filesystem), so a racer never sees a freshly-made lock
+# whose pid file is torn or absent. On a lost mkdir, only a pid file that names a
+# demonstrably dead process is reclaimed; an absent/unreadable pid means someone
+# is mid-acquisition, so we back off and retry a bounded number of times instead
+# of rm -rf'ing under them. <label> names what is locked, in the messages.
+# `wait` (set for the registry lock) makes a LIVE holder cause a bounded wait
+# instead of an immediate refusal: that lock is held for a heartbeat, not for a
+# whole claim.
+lane_mkdir_lock() {
+  local lock="$1" label="$2" wait="${3:-0}" pidfile holder tmpfile stale i=0
   pidfile="${lock}/pid"
   while :; do
     if mkdir "$lock" 2>/dev/null; then
@@ -458,23 +578,62 @@ review_claim_lock() {
       fi
       tmpfile="${lock}/pid.$$"
       echo $$ > "$tmpfile"
-      mv "$tmpfile" "$pidfile" 2>/dev/null || { rm -rf "$lock"; echo "lane: cannot lock pr/$pr" >&2; exit 3; }
+      mv "$tmpfile" "$pidfile" 2>/dev/null || { rm -rf "$lock"; echo "lane: cannot lock ${label}" >&2; exit 3; }
       return 0
     fi
     holder="$(cat "$pidfile" 2>/dev/null || true)"
     if [ -n "$holder" ]; then
       if kill -0 "$holder" 2>/dev/null; then
-        echo "lane: review of PR $pr is being claimed right now (pid $holder) — retry in a moment (task 109)." >&2
-        exit 3
+        # A live holder. A pr/<n> lock is held for a whole claim, so this means
+        # another session is claiming that PR: refuse at once (task 156). The
+        # registry lock is held for one duplicate check and one append, so a live
+        # holder there is nearly always a heartbeat — wait the bounded window
+        # instead of failing a parallel claim (review of ticket 344, F1/F4).
+        if [ "$wait" = 0 ]; then
+          echo "lane: ${label} is being claimed right now (pid $holder) — retry in a moment." >&2
+          exit 3
+        fi
+      else
+        # Stale: the pid named a dead process. Re-read it before removing
+        # anything, and rename the directory out of the way first: two racers can
+        # both see one dead pid, and without the re-check the slower one would
+        # `rm -rf` the lock the winner had just taken (review of ticket 344, F3 —
+        # the task 156 pattern, now guarding the whole registry, not one PR).
+        stale="${lock}.stale.$$"
+        if [ "$(cat "$pidfile" 2>/dev/null || true)" = "$holder" ] \
+           && mv "$lock" "$stale" 2>/dev/null; then
+          rm -rf "$stale"
+        fi
+        continue
       fi
-      rm -rf "$lock"                     # stale: the pid named a dead process
-      continue
     fi
-    # pid absent/unreadable: the holder is still mid-acquisition — back off.
+    # Back off and retry: no pid published yet (the holder is mid-acquisition),
+    # or a live registry holder we are waiting for.
     i=$((i + 1))
-    [ "$i" -le 250 ] || { echo "lane: cannot lock pr/$pr (still being acquired after $i retries)" >&2; exit 3; }
+    [ "$i" -le 250 ] || { echo "lane: cannot lock ${label} (still held after ${i} retries)" >&2; exit 3; }
     sleep 0.02
   done
+}
+
+# review_claim_lock <pr> — the mkdir lock for pr/<n>, ask-pi's thread-lock shape
+# (task 156): two same-instant claims of one PR cannot both pass
+# check_review_claim.
+review_claim_lock() {
+  lane_mkdir_lock "${common}/.lane-review-${1}.lock" "review of PR $1 (task 109)"
+}
+
+# registry_lock — the ONE lock for lanes.tsv's read-modify-write (ticket 344):
+# `lane new` (check-then-append), `lane rm` (grep-then-rewrite) and `lane prune
+# --apply` (scan-then-rewrite) all hold it across their read→write window, so
+# none of them can lose another's row. A lock dir in the shared git dir, beside
+# the registry itself; lane_locks_arm's EXIT trap releases it. The third argument
+# makes a contended holder WAIT for it (bounded) instead of refusing at once: it
+# is held for one check-and-rewrite, so contention is a heartbeat, not another
+# session's claim.
+registry_lock() {
+  lane_mkdir_lock "${common}/.lane-registry.lock" "the lane registry" 1
+  lane_lockdirs="${lane_lockdirs}
+${common}/.lane-registry.lock"
 }
 
 lane_new() {
@@ -509,18 +668,7 @@ lane_new() {
   # reintroduces the lock leak task 156 closed, and none of tests 19-22 would
   # catch it (they only exercise refusal/race paths, not a winning claim's
   # cleanup on the ordinary success path).
-  lane_lockdirs=""
-  # task 156: install signal/exit handling ONCE, before the first lock is taken.
-  # Cleanup is EXIT-only — EXIT fires however the process exits, and it reads
-  # ${lane_lockdirs} at fire time, so every lock grabbed (including a later one
-  # in a multi-pr --owns list) is released even on a mid-loop refusal. INT/TERM
-  # must call `exit` themselves: a trap handler that doesn't exit RESUMES at the
-  # next statement after the signal, so a bare cleanup trap on INT/TERM would
-  # free the lock early and then keep running to append the row (the two-winners
-  # race task 156 closes, reopened through Ctrl-C). 130/143 = 128+signal.
-  trap 'for l in ${lane_lockdirs}; do rm -rf "$l" 2>/dev/null; done' EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
+  lane_locks_arm
   local l_own l_pr seen_prs=""
   for l_own in ${owns//,/ }; do
     case "$l_own" in
@@ -535,7 +683,8 @@ lane_new() {
         case " $seen_prs " in *" $l_pr "*) continue ;; esac
         seen_prs="${seen_prs} $l_pr"
         review_claim_lock "$l_pr"
-        lane_lockdirs="${lane_lockdirs} ${common}/.lane-review-${l_pr}.lock"
+        lane_lockdirs="${lane_lockdirs}
+${common}/.lane-review-${l_pr}.lock"
         ;;
     esac
   done
@@ -553,6 +702,8 @@ lane_new() {
   # refused outright — it names the live holder or demands an explicit `lane rm`.
   check_review_claim "$name" "$owns" || exit 3
 
+  # The cheap early refusal. The authoritative duplicate check is the one taken
+  # under the registry lock, just before the append (ticket 344).
   grep -q "^${name}$(printf '\t')" "$REG" && die "lane '$name' already exists (lane ls)"
 
   local root repo dir branch claimed_by main_root
@@ -601,9 +752,19 @@ lane_new() {
     if [ -d "$dir" ]; then
       echo "reusing existing worktree at $dir"
     elif git show-ref --verify --quiet "refs/heads/${wt_branch}"; then
-      git worktree add "$dir" "$wt_branch" >&2
+      # Quietly (ticket 321): git writes its checkout progress ("Preparing
+      # worktree …", "Updating files: NN%") to stderr, which is why a caller
+      # piped `lane new` to hide it — and a pipe loses the coordinates block.
+      # -q asks git for silence and the capture drops anything it still writes
+      # (git prints nothing to stdout here); a failure reprints it all.
+      wt_err="$(git worktree add -q "$dir" "$wt_branch" 2>&1)" \
+        || { echo "$wt_err" >&2; exit 1; }
+      lane_created_wt="$dir"          # an existing branch: the worktree is ours, the branch is not
     else
-      git worktree add -b "$wt_branch" "$dir" >&2
+      wt_err="$(git worktree add -q -b "$wt_branch" "$dir" 2>&1)" \
+        || { echo "$wt_err" >&2; exit 1; }
+      lane_created_wt="$dir"
+      lane_created_branch="$wt_branch"
     fi
     branch="$wt_branch"
   else
@@ -613,12 +774,26 @@ lane_new() {
   echo "checking for collisions with existing lanes…" >&2
   check_overlap "$name" "$owns"
 
+  # ticket 344: ONE lock for the registry's read-modify-write, taken HERE — right
+  # before the authoritative check-then-append — and not earlier, so it is not
+  # held across `git worktree add`: a second window claiming another name must not
+  # be refused for the seconds a worktree takes to check out. This check plus the
+  # append is one RMW with `lane rm` / `lane prune --apply`'s rewrite (an append
+  # landing between their read and their `mv` is dropped by the rewrite), and two
+  # same-instant claims of one name must not both pass. The duplicate check above
+  # is the cheap early refusal; this one, under the lock, is the authoritative
+  # one. The lock order is always the pr/<n> locks first, then this one, and
+  # rm/prune take only this one, so the two can never deadlock.
+  registry_lock
+  grep -q "^${name}$(printf '\t')" "$REG" && die "lane '$name' already exists (lane ls)"
+
   # claimed_by = the agent session that ran `lane new`. ask-pi/ask-claude use it
   # to default their bridge thread to THIS session's lane, so two sessions in one
   # worktree cannot silently share the default thread.
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$name" "$agent" "$name" "$dir" "$branch" "$owns" "$(date +%Y-%m-%d)" \
     "$claimed_by" >> "$REG"
+  lane_wrote_row=1     # from here a worktree this run made is not orphaned
 
   # linked worktree iff the claimed dir's --git-dir differs from --git-common-dir
   # (resolved and canonical), whatever flag was (or wasn't) passed. A caller who

@@ -51,7 +51,7 @@ SRC="$(CDPATH= cd -P "$(dirname "$_self")" && pwd)"
 SCRIPTS=(
   ask-pi ask-claude lane lane-guard README.md sync
   dispatch.sh
-  lib/frontmatter.sh lib/lane-core.sh lib/portable-date.sh lib/repo-root.sh
+  lib/frontmatter.sh lib/in-flight.sh lib/lane-core.sh lib/portable-date.sh lib/repo-root.sh
 )
 
 TARGETS=(
@@ -120,9 +120,7 @@ push_parked() {
     cp -p "$SRC/$f" "$tmp/tools/agent-bridge/$f" || { copy_failed=1; break; }
   done
   [ "$copy_failed" -eq 0 ] || { fail "$target" "$ref" "copy into the worktree failed"; return 0; }
-  chmod 755 "$tmp/tools/agent-bridge"/ask-pi "$tmp/tools/agent-bridge"/ask-claude \
-    "$tmp/tools/agent-bridge"/lane "$tmp/tools/agent-bridge"/lane-guard \
-    "$tmp/tools/agent-bridge"/sync "$tmp/tools/agent-bridge"/dispatch.sh 2>/dev/null || true
+  chmod_execs "$tmp/tools/agent-bridge"
   if ! out="$(git -C "$tmp" add -- "${SCRIPTS[@]/#/tools/agent-bridge/}" 2>&1)"; then
     fail "$target" "$ref" "git add failed${out:+ — $(tail_line "$out")}"; return 0
   fi
@@ -151,6 +149,19 @@ push_parked() {
   return 0
 }
 
+# chmod_execs <tools/agent-bridge dir> — the copied files that must stay
+# executable are the ones executable in canonical. Derived from SCRIPTS, not a
+# second hand-typed list that drifts the moment a script is added (task 310).
+chmod_execs() {
+  local f
+  for f in "${SCRIPTS[@]}"; do
+    # A chmod that cannot stick is reported by the caller's own copy/commit
+    # checks, not by aborting the run mid-target as a bare chmod did.
+    if [ -x "$SRC/$f" ]; then chmod 755 "$1/$f" 2>/dev/null || true; fi
+  done
+  return 0
+}
+
 for target in "${TARGETS[@]}"; do
   if [ ! -d "$target" ]; then
     echo "MISSING  $target — skipped"
@@ -164,7 +175,26 @@ for target in "${TARGETS[@]}"; do
   fi
   git -C "$target" fetch -q origin 2>/dev/null ||
     echo "WARN     $target — fetch failed; checking the last-fetched ref"
-  ref="$(git -C "$target" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || echo origin/main)"
+  # A checkout's origin/HEAD is the only local statement of the mirror's default
+  # branch. Unset, the old fallback was origin/main — which pushes a mirror whose
+  # default is another name (or whose main is a stale leftover) to the wrong
+  # branch. Ask the remote for its HEAD instead (read-only, so --check still
+  # changes nothing), and refuse the mirror if it does not say, or names a branch
+  # the mirror does not have (task 310).
+  ref="$(git -C "$target" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+  if [ -z "$ref" ]; then
+    head_branch="$(git -C "$target" ls-remote --symref origin HEAD 2>/dev/null \
+      | sed -n 's|^ref: refs/heads/\(.*\)[[:space:]]*HEAD$|\1|p' | head -1)"
+    if [ -n "$head_branch" ] \
+       && git -C "$target" rev-parse --verify --quiet "refs/remotes/origin/${head_branch}" >/dev/null; then
+      ref="origin/${head_branch}"
+    fi
+  fi
+  if [ -z "$ref" ]; then
+    echo "NODEFAULT $target — origin/HEAD is unset and the remote did not name a default branch the mirror has; not guessing origin/main"
+    stale=$((stale + 1))
+    continue
+  fi
   dest="$target/tools/agent-bridge"
   changes=()
 
@@ -206,7 +236,7 @@ for target in "${TARGETS[@]}"; do
       continue
     fi
     echo "PARKED   $target  ($ref: ${changes[*]}) — checkout on '${checked_out:-detached}', not at $ref, or tools/agent-bridge/ dirty; not writing"
-    echo "         copy via a throwaway worktree: git -C $target worktree add --detach <tmp> $ref"
+    echo "         push it through a throwaway worktree: tools/agent-bridge/sync --via-worktree"
     continue
   fi
 
@@ -227,8 +257,7 @@ for target in "${TARGETS[@]}"; do
     mkdir -p "$(dirname "$dest/$f")"
     cp "$SRC/$f" "$dest/$f"
   done
-  chmod 755 "$dest"/ask-pi "$dest"/ask-claude "$dest"/lane "$dest"/lane-guard \
-    "$dest"/sync "$dest"/dispatch.sh
+  chmod_execs "$dest"
   echo "synced   $target  ($ref: ${changes[*]})"
   copied=$((copied + 1))
 done
@@ -246,4 +275,4 @@ if [ "$via_worktree" -eq 1 ]; then
   exit $([ "$remaining" -le 0 ] && echo 0 || echo 1)
 fi
 echo "synced $copied repo(s), $skipped missing. Commit and push tools/agent-bridge/ in each repo named above;"
-echo "any PARKED repo goes through a throwaway worktree off its origin default branch."
+echo "any PARKED repo goes out through: tools/agent-bridge/sync --via-worktree"

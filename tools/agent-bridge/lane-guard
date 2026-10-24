@@ -4,6 +4,12 @@
 # CLAIM; nothing stopped a session that never claimed anything from simply
 # editing a tree another live session holds. This is that stop.
 #
+# Which session holds a tree is task 154's question and ticket 332's: a live
+# lane claim holds it; without one, the MAIN checkout is held by a session that
+# wrote there inside the last 30 minutes (an idle window holds nothing), and a
+# linked worktree by the earliest-started session. README.md, "Who holds a tree
+# when there is no claim", states the rule and the order of the refusal.
+#
 #   lane-guard pre       # PreToolUse, matcher Edit|Write|MultiEdit|NotebookEdit|Bash
 #   lane-guard notices    # UserPromptSubmit and PostToolUse
 #
@@ -37,25 +43,55 @@ source "${script_dir}/lib/lane-core.sh"
 
 sessions_dir="${LANE_SESSIONS_DIR:-$HOME/.claude/sessions}"
 
+# The write window (ticket 332): in the main checkout a session holds the tree
+# only while it has written there inside this many minutes. ONE named value, so
+# a test can shorten it instead of forging old timestamps.
+write_window_min="${LANE_GUARD_WRITE_WINDOW_MINUTES:-30}"
+case "$write_window_min" in '' | *[!0-9]* | 0) write_window_min=30 ;; esac
+
 # bash_write_ish <command> — heuristic: does this Bash command look like it
-# writes to disk? Deliberately imprecise in both directions (a `>` inside a
-# quoted grep pattern is a false positive; a write hidden behind a wrapper
-# script is a false negative) — this gates a hook that must stay fast and
-# fail open, not a security boundary. A command that doesn't match is never
-# refused, so a false negative here is silent; a false positive just costs
-# one extra holder check, which is cheap.
+# writes to disk? On a match it prints the NAME of the pattern that matched and
+# returns 0; with no match it prints nothing and returns 1. The refusal names
+# the printed pattern, so a session can see why its command counted (ticket
+# 344).
+#
+# Deliberately imprecise in both directions (a `>` inside a quoted grep pattern
+# is a false positive; a write hidden behind a wrapper script is a false
+# negative) — this gates a hook that must stay fast and fail open, not a
+# security boundary. A command that doesn't match is never refused, so a false
+# negative here is silent; a false positive just costs one extra holder check,
+# which is cheap.
 bash_write_ish() {
-  local c=" $1 "
+  local c=" $1 " entry label pat
+  # `2>&1` and `2>/dev/null` are NOT writes: they send stderr to stdout or to
+  # the void, so a read-only command that carries one must not be refused in a
+  # tree another session holds (ticket 344). Strip exactly those two forms, then
+  # test the rest of the rule unchanged — every other `>` still counts, a bare
+  # `> /dev/null`, `1>/dev/null` and `2> /dev/null` included.
   case "$c" in
-    *'>'*|*' tee '*|*'sed'*'-i'*|*'perl'*'-i'*|*' mv '*|*' cp '*|*' rm '*|*' mkdir '*|*' touch '*|*' chmod '*|*' ln '*)
-      return 0 ;;
+    *'2>&1'* | *'2>/dev/null'*)
+      c="$(printf '%s' "$c" | sed -e 's/2>&1//g' -e 's|2>/dev/null||g')" ;;
   esac
-  case "$c" in
-    *' git add'*|*' git commit'*|*' git checkout'*|*' git switch'*|*' git reset'*|*' git restore'*| \
-    *' git merge'*|*' git rebase'*|*' git cherry-pick'*|*' git revert'*|*' git stash'*|*' git apply'*| \
-    *' git am'*|*' git pull'*|*' git clean'*|*' git rm'*|*' git mv'*)
-      return 0 ;;
-  esac
+  # label:pattern — one entry per form that counts, each pattern spelled exactly
+  # as the case arms it replaces read it (surrounding spaces included: ` rm `
+  # must not match `form`). `>` is first, so the commonest write names itself.
+  # `[[ $c == *$pat* ]]`, not a `case` arm: bash 3.2 does not match an unquoted
+  # variable in a case-arm position, and a bare `>` there is a syntax error.
+  for entry in \
+    '>:>' 'tee: tee ' 'sed -i:*sed*-i*' 'perl -i:*perl*-i*' \
+    'mv: mv ' 'cp: cp ' 'rm: rm ' 'mkdir: mkdir ' 'touch: touch ' 'chmod: chmod ' 'ln: ln ' \
+    'git add: git add' 'git commit: git commit' 'git checkout: git checkout' \
+    'git switch: git switch' 'git reset: git reset' 'git restore: git restore' \
+    'git merge: git merge' 'git rebase: git rebase' 'git cherry-pick: git cherry-pick' \
+    'git revert: git revert' 'git stash: git stash' 'git apply: git apply' \
+    'git am: git am' 'git pull: git pull' 'git clean: git clean' \
+    'git rm: git rm' 'git mv: git mv'
+  do
+    label="${entry%%:*}"
+    pat="${entry#*:}"
+    # shellcheck disable=SC2053   # the unquoted $pat is a pattern on purpose
+    if [[ $c == *$pat* ]]; then printf '%s' "$label"; return 0; fi
+  done
   return 1
 }
 
@@ -182,13 +218,148 @@ earliest_started_session_in_tree() {
   printf '%s' "$best_sid"
 }
 
-# is_holder <sessionId> — the task 154 tiebreak: (a) a live claim by
-# <sessionId> makes it a holder outright; (b) otherwise, ONLY if no live
-# claim exists on this tree at all, the earliest-started live session there is
-# the holder.
+# ---- the write record (ticket 332) ------------------------------------------
+# In the main checkout a session holds the tree only while it has written there
+# inside the window, so the hook has to remember when each session last wrote.
+# The record is <git-common-dir>/lane-writes.tsv: inside the shared git dir (so
+# the registry, the notices and this record sit in one place, shared by every
+# worktree of the repo) and never in the work tree, so it is never committed.
+# One row per allowed write, "<epoch><TAB><sessionId>", appended, so a session's
+# LAST row is its newest write. Rows older than the window are ignored when read.
+# The file is rewritten (below) once it passes write_record_max_rows: that drops
+# the rows outside the window and keeps ONE row per live holder, so it never
+# grows past that bound and a session that quits ages out of it. A record that
+# cannot be read or appended prints one line and changes no decision (fail open).
+WRITE_RECORD_MAX_ROWS=64
+writes_tsv=""
+write_rows_n=0
+write_holders_tsv=""
+write_holder_rows=""
+write_holder_facts=""; write_holder_sid=""; write_holder_name=""
+holder_facts=""; holder_sid=""; holder_name=""
+
+# lane_guard_load_writes <file> <now> <window_min> — set $writes_tsv to the rows
+# inside the window and $write_rows_n to how many rows the file held. Never
+# fails.
+lane_guard_load_writes() {
+  local file="$1" now="$2" window="$3" cutoff ts sid kept=""
+  writes_tsv=""
+  write_rows_n=0
+  case "$now" in '' | *[!0-9]*) return 0 ;; esac
+  [ -f "$file" ] || return 0
+  if [ ! -r "$file" ]; then
+    echo "lane-guard: cannot read the write record — allowing (fail open)." >&2
+    return 0
+  fi
+  cutoff=$(( now - window * 60 ))
+  while IFS=$'\t' read -r ts sid; do
+    write_rows_n=$(( write_rows_n + 1 ))
+    case "$ts" in '' | *[!0-9]*) continue ;; esac
+    [ -n "$sid" ] || continue
+    [ "$ts" -ge "$cutoff" ] || continue
+    kept="${kept}${ts}"$'\t'"${sid}"$'\n'
+  done < "$file"
+  writes_tsv="$kept"
+  return 0
+}
+
+# lane_guard_compact_writes <file> — once the record passes
+# $WRITE_RECORD_MAX_ROWS, replace it with one row per live holder ($write_holder_rows,
+# built by write_holders): the rows outside the window and every duplicate row go.
+# Rewriting costs one `mv`, so it happens roughly once per 64 writes, not per
+# call. ponytail: no lock; a row appended between the read and the move can be
+# lost, and a lost row loses a hold, which allows a write — the fail-open
+# direction. The bound is what keeps that window rare.
+lane_guard_compact_writes() {
+  local file="$1"
+  local tmp="${file}.$$.tmp"
+  [ "${write_rows_n:-0}" -gt "$WRITE_RECORD_MAX_ROWS" ] || return 0
+  if printf '%s' "$write_holder_rows" > "$tmp" 2>/dev/null && mv "$tmp" "$file" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
+# lane_guard_record_write <file> <sessionId> <now> — append this allowed write.
+lane_guard_record_write() {
+  local file="$1" sid="$2" now="$3"
+  case "$now" in '' | *[!0-9]*) now=0 ;; esac   # no clock → a row nobody counts
+  if ! printf '%s\t%s\n' "$now" "$sid" >> "$file" 2>/dev/null; then
+    echo "lane-guard: cannot record this write — allowing (fail open)." >&2
+  fi
+  return 0
+}
+
+# write_holders — set $write_holders_tsv ("sessionId<TAB>minutesAgo" per LIVE
+# session that wrote inside the window), $write_holder_rows (the newest row of
+# each of them, for the compaction) and, in the same pass, part 1 of the
+# refusal's fact: $write_holder_facts / _$sid / _$name. A dead session's
+# row must not hold a tree: that would be the idle-window block this rule exists
+# to end, only after a crash. Empty $write_holders_tsv means NOBODY holds the
+# tree. Pure bash over the two short lists (the record holds a handful of rows,
+# the sessions a few dozen), so neither path forks anything new.
+write_holders() {
+  local -a rows=()
+  local n=0 ts sid i j pid name m unit
+  local s_pid s_sid s_cwd s_name s_status s_started
+  write_holders_tsv=""; write_holder_rows=""
+  write_holder_facts=""; write_holder_sid=""; write_holder_name=""
+  [ -n "$writes_tsv" ] || return 0
+  while IFS=$'\t' read -r ts sid; do
+    [ -n "$sid" ] || continue
+    rows[$n]="${ts}"$'\t'"${sid}"
+    n=$(( n + 1 ))
+  done <<< "$writes_tsv"
+  # Walking the rows BACKWARDS makes each session's newest write the first one
+  # seen for it — the record only appends, so the last row wins.
+  for (( i = n - 1; i >= 0; i-- )); do
+    sid="${rows[$i]#*$'\t'}"
+    ts="${rows[$i]%%$'\t'*}"
+    for (( j = i + 1; j < n; j++ )); do
+      [ "${rows[$j]#*$'\t'}" = "$sid" ] && continue 2   # a newer row for this session
+    done
+    pid=""; name=""
+    while IFS=$'\t' read -r s_pid s_sid s_cwd s_name s_status s_started; do
+      [ "$s_sid" = "$sid" ] || continue
+      pid="$s_pid"; name="$s_name"; break
+    done <<< "$sessions_tsv"
+    [ -n "$pid" ] || continue          # a session we cannot see cannot hold
+    is_live "$pid" || continue
+    m=$(( (write_now - ts) / 60 )); [ "$m" -ge 0 ] || m=0
+    write_holders_tsv="${write_holders_tsv}${sid}"$'\t'"${m}"$'\n'
+    write_holder_rows="${write_holder_rows}${ts}"$'\t'"${sid}"$'\n'
+    unit=minutes; [ "$m" = 1 ] && unit=minute
+    write_holder_facts="${write_holder_facts:+$write_holder_facts; }session ${name:-?} [$(short_id "$sid")] wrote here ${m} ${unit} ago"
+    [ -n "$write_holder_sid" ] || { write_holder_sid="$sid"; write_holder_name="${name:-?}"; }
+  done
+  return 0
+}
+
+# holds_by_recent_write <sessionId> — true when it holds the main checkout by a
+# write inside the window. Reads the precomputed $write_holders_tsv (a string
+# match: no loop, no fork, nothing to read).
+holds_by_recent_write() {
+  case $'\n'"$write_holders_tsv" in
+    *$'\n'"$1"$'\t'*) return 0 ;;
+  esac
+  return 1
+}
+
+# is_holder <sessionId> — (a) a live claim by <sessionId> makes it a holder
+# outright, unchanged; (b) otherwise: in the MAIN checkout <sessionId> holds
+# while it has written there inside the window (ticket 332) — and a recent write
+# keeps holding BESIDE someone else's claim, so a --share-worktree pairing adds
+# a writer instead of displacing one; in a linked worktree, ONLY if no live claim
+# exists on this tree at all, the earliest-started live session there holds it
+# (task 154's tiebreak, kept for worktrees).
 is_holder() {
   local id="$1"
   has_live_claim_by "$id" && return 0
+  if [ "$tree_is_main" = 1 ]; then
+    holds_by_recent_write "$id"
+    return
+  fi
   any_live_claim_on_tree && return 1
   local earliest; earliest="$(earliest_started_session_in_tree)"
   # No startedAt anywhere in the tree → the earliest-started tiebreak has no
@@ -196,6 +367,22 @@ is_holder() {
   # empty tiebreak must allow, never refuse every session at once).
   [ -z "$earliest" ] && return 0
   [ "$id" = "$earliest" ]
+}
+
+# write_allowed <sessionId> — the allow/refuse decision itself.
+write_allowed() {
+  local id="$1"
+  is_holder "$id" && return 0
+  # A live claim holds the tree and this session is not its claimant; rule (b)
+  # does not apply at all (ticket 332: a lane claim still wins).
+  any_live_claim_on_tree && return 1
+  if [ "$tree_is_main" = 1 ]; then
+    # Nobody wrote inside the window → nobody holds the tree, so there is
+    # nothing to refuse (task 332: an idle window no longer blocks the checkout).
+    [ -z "$write_holders_tsv" ]
+    return
+  fi
+  ! other_present "$id"
 }
 
 # other_present <sessionId> — true if some session OTHER than <sessionId> is
@@ -220,24 +407,37 @@ other_present() {
   return 1
 }
 
-# find_named_holder — for the refusal MESSAGE only (the allow/refuse decision
-# above never calls this): the first live, non-review lane claim on this tree,
-# else the earliest-started live session there. Prints
-# "DESC<TAB>NAME<TAB>SID", empty if neither exists. Never fails.
-find_named_holder() {
-  local c_name c_claimed c_cname c_cshort
-  IFS=$'\t' read -r c_name c_claimed c_cname c_cshort <<< "$tree_claims"
-  if [ -n "$c_name" ]; then
-    printf 'lane %s (claimed by %s [%s])\t%s\t%s\n' "$c_name" "${c_cname:-?}" "$c_cshort" "${c_cname:-?}" "$c_claimed"
-    return 0
+# build_holder_facts <sessionId> — for the refusal MESSAGE only (the
+# allow/refuse decision never calls this). Sets $holder_facts to one clause per
+# holding session, joined "; ", and $holder_sid / $holder_name to the first of
+# them (whom the notice and part 4 name). Part 1 of Brendan's order is "the
+# fact: which session wrote there, and how many minutes ago" (2026-10-12), so
+# each clause names the session and its age; a lane claim is the fact when a
+# claim is what holds the tree. Never fails; empty when no holder can be named.
+build_holder_facts() {
+  local me="$1" facts="" c_name c_claimed c_cname c_cshort sid cname
+  holder_facts=""; holder_sid=""; holder_name=""
+  if [ -n "$tree_claims" ]; then
+    while IFS=$'\t' read -r c_name c_claimed c_cname c_cshort; do
+      [ -n "$c_name" ] || continue
+      [ "$c_claimed" = "$me" ] && continue
+      facts="${facts:+$facts; }session ${c_cname:-?} [${c_cshort}] holds this tree by lane ${c_name}"
+      [ -n "$holder_sid" ] || { holder_sid="$c_claimed"; holder_name="${c_cname:-?}"; }
+    done <<< "$tree_claims"
   fi
-
-  local best_sid info best_name
-  best_sid="$(earliest_started_session_in_tree)"
-  [ -n "$best_sid" ] || return 0
-  info="$(claimant_info "$best_sid")"
-  best_name="${info#*$'\t'}"
-  printf 'session %s [%s]\t%s\t%s\n' "${best_name:-?}" "$(short_id "$best_sid")" "${best_name:-?}" "$best_sid"
+  # A recent writer holds too, beside a claim (see is_holder): name it as well.
+  if [ "$tree_is_main" = 1 ] && [ -n "$write_holder_facts" ]; then
+    facts="${facts:+$facts; }${write_holder_facts}"
+    [ -n "$holder_sid" ] || { holder_sid="$write_holder_sid"; holder_name="$write_holder_name"; }
+  elif [ "$tree_is_main" != 1 ] && [ -z "$facts" ]; then
+    sid="$(earliest_started_session_in_tree)"
+    if [ -n "$sid" ] && [ "$sid" != "$me" ]; then
+      cname="$(claimant_info "$sid")"; cname="${cname#*$'\t'}"
+      facts="session ${cname:-?} [$(short_id "$sid")] is the earliest-started session in this tree"
+      holder_sid="$sid"; holder_name="${cname:-?}"
+    fi
+  fi
+  holder_facts="$facts"
 }
 
 # lane_guard_cleanup_notices — opportunistic (task 154, design note 2): a
@@ -273,7 +473,7 @@ cmd_pre() {
     exit 0
   fi
 
-  local session_id cwd tool_name file_path notebook_path command
+  local session_id cwd tool_name file_path notebook_path command write_why=""
   # One jq call for the single-line fields, joined on \x1f (a separator paths
   # and commands never contain) so empty fields survive `read` — a tab
   # delimiter would collapse the empty file_path/notebook_path fields.
@@ -300,7 +500,8 @@ cmd_pre() {
       [ -n "$notebook_path" ] && dir="$(dirname "$notebook_path")"
       ;;
     Bash)
-      bash_write_ish "$command" || exit 0   # read-only Bash is never refused
+      # On a match, keep WHICH pattern matched — the refusal names it (ticket 344).
+      write_why="$(bash_write_ish "$command")" || exit 0   # read-only Bash is never refused
       dir="$cwd"
       ;;
     *)
@@ -309,6 +510,7 @@ cmd_pre() {
   [ -n "$dir" ] || exit 0
 
   local d out tree common REG sessions_tsv tree_sessions tree_claims
+  local tree_is_main=0 write_now=""
   d="$(canon "$dir")"
   # One git call for both the tree root and the shared git dir (the hook runs
   # on every edit; two `rev-parse` forks were ~20 ms of the latency budget).
@@ -327,19 +529,37 @@ cmd_pre() {
   tree_sessions="$(in_tree_sessions "$tree")"
   tree_claims="$(claims_on_tree "$tree")"
 
+  # Main checkout or linked worktree (ticket 332): a main checkout's .git is a
+  # real directory; a linked worktree's (and a submodule's) is a file pointing
+  # into the shared git dir. The write window applies to the main checkout only
+  # — a linked worktree keeps task 154's earliest-started rule.
+  tree_is_main=0
+  [ -d "${tree}/.git" ] && tree_is_main=1
+  write_now="$(date +%s 2>/dev/null)"
+  case "$write_now" in '' | *[!0-9]*) write_now="" ;; esac
+  # The record is read in the main checkout even beside a claim: a recent write
+  # is a hold of its own there, so a share claim adds a writer rather than
+  # displacing one. A linked worktree reads no record (its rule is task 154's).
+  if [ "$tree_is_main" = 1 ]; then
+    lane_guard_load_writes "${common}/lane-writes.tsv" "$write_now" "$write_window_min"
+    write_holders
+    lane_guard_compact_writes "${common}/lane-writes.tsv"
+  fi
+
   lane_guard_cleanup_notices
 
-  if is_holder "$session_id" \
-     || ! other_present "$session_id"; then
+  if write_allowed "$session_id"; then
+    # Record the write so the next call can see it. Only the main checkout's
+    # rule reads the record, so only its writes go in it — a worktree would
+    # just litter the shared file with rows no rule reads.
+    [ "$tree_is_main" = 1 ] \
+      && lane_guard_record_write "${common}/lane-writes.tsv" "$session_id" "$write_now"
     exit 0
   fi
 
-  # Refused. Name a holder for the message, and tell them — once per
-  # (cotenant, tree) — that someone just tried to write here.
-  local holder_line holder_desc holder_name holder_sid
-  holder_line="$(find_named_holder)"
-  IFS=$'\t' read -r holder_desc holder_name holder_sid <<< "$holder_line"
-  [ -n "$holder_desc" ] || holder_desc="another live session in this tree"
+  # Refused. Name every holder for the message, and tell the first of them —
+  # once per (cotenant, tree) — that someone just tried to write here.
+  build_holder_facts "$session_id"
 
   local info cname cshort
   info="$(claimant_info "$session_id")"
@@ -350,8 +570,16 @@ cmd_pre() {
   fi
 
   {
-    echo "lane-guard: refusing this write — ${tree} is held by ${holder_desc}."
-    echo "lane-guard: two ways out — \`lane new <name> --share-worktree\` for a deliberate pairing, or SendMessage to \"${holder_name:-the holder}\"."
+    # Brendan's four-part order (2026-10-12, task 299; ticket 332). Part 1 is
+    # the fact — which session wrote there, and how many minutes ago — and
+    # ticket 344's "which pattern matched" stays INSIDE it (Brendan,
+    # 2026-10-16). Parts 2 to 4 are the way out, least disruptive first.
+    printf 'lane-guard: refusing this write — %s' "${holder_facts:-another live session in this tree}"
+    [ -n "$write_why" ] && printf '; your command counts as a write because of `%s`' "$write_why"
+    printf '.\n'
+    echo "lane-guard: work in your own worktree folder — \`lane ls\` lists them."
+    echo "lane-guard: if you must write here, take a share claim and name the files you own — \`lane new <name> --share-worktree --owns <path>\`."
+    echo "lane-guard: message the holder — SendMessage to \"${holder_name:-the holder}\"."
   } >&2
   exit 2
 }

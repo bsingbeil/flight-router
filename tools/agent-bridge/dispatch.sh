@@ -22,15 +22,27 @@ options:
   --lane NAME       lane name (passed to `ask-pi -t <lane>`)
   --task ID         task id this dispatch is for (free text, e.g. a tasks/ slug)
   --series NAME     optional series/campaign label, carried into the record
-  --eta MINUTES     minutes until deadline (default: 30)
+  --eta MINUTES     minutes until deadline (default: 30). Digits are decimal:
+                    `08` is 8 minutes, never octal. Its deadline also bounds
+                    --wait (see below).
   --message-file PATH
                     read the brief from PATH (mutually exclusive with a
                     positional message; a missing or empty file is refused)
   --wait            block until the worker exits, print the last 20 lines of
                     the dispatch log, and exit with the worker's exit code.
                     Without --wait the command returns as soon as the worker is
-                    launched — redirect to a FILE, not a pipe: the detached
-                    worker inherits stdout and holds a pipe open.
+                    launched. Redirect to FILES: a pipe as stdout or stderr is
+                    refused (exit 2), because the detached worker's subshell holds
+                    it open until the worker exits — or pass --wait instead.
+                    The wait stops once the record's deadline has passed by
+                    DISPATCH_WAIT_GRACE seconds (default 300), then exits 6:
+                    ask-pi has no timeout, so an unbounded wait would outlive it.
+  --reason TEXT     why this dispatch happened, carried into the record: `first`
+                    (a ticket's first start), `sent-back` (the lander refused a
+                    worker's finished work) or `worker-died` (the previous worker
+                    never closed, or closed non-zero). `ticket.sh start` and
+                    `ticket.sh redispatch` set it; `lands.tsv` counts send-backs
+                    from it, so a worker that died is never counted as one.
   --no-preflight    skip the model-API reachability check silently
   --force           dispatch past the 2-Pi ceiling anyway (warns loudly)
   --force-shared-checkout
@@ -42,28 +54,34 @@ options:
 Refuses (writing no record and launching nothing):
   exit 2  bad arguments (no brief, both a file and a positional message, a
           missing or empty --message-file, a missing --lane/--task, a
-          non-integer --eta)
+          non-integer --eta), or stdout/stderr is a pipe without --wait
   exit 3  another unfinished Pi dispatch is already running against this same
           working tree — ADR 0086 makes a git worktree mandatory per parallel lane
   exit 4  the 2-Pi ceiling is already reached (ADR 0086; Pi only — nothing else
           writes dispatch records today)
-  exit 5  the worker cannot reach its model's API base URL (proxy or network)
-  exit 6  --wait only: the worker is gone and its record never closed, or the
-          record closed with no exit code — the worker's fate is unknown
+  exit 5  the preflight cannot prove the worker will reach its model's API: no
+          HTTP response (proxy or network), curl is not installed, or the
+          provider's baseUrl is not an http(s) URL string
+  exit 6  --wait only: the worker is gone and its record never closed, the
+          record closed with no exit code, or the record's deadline passed by
+          DISPATCH_WAIT_GRACE seconds — the worker's fate is unknown
 
 Prints the record path (line 1) and the ask-pi pid (line 2).
 With --wait the exit code is the worker's (0, or whatever ask-pi returned); a
 run that prints no record path refused before launch, so the exit code is
-dispatch.sh's own (2, 3, 4 or 5); exit 6 means the worker's fate is unknown.
+dispatch.sh's own (2, 3, 4 or 5); exit 6 means the worker's fate is unknown. A
+--wait that gave up at the deadline leaves the worker running: the record is
+still its handle.
 EOF
 }
 
-lane=""; task=""; series=""; eta=30; force=0; force_shared=0; message_file=""; do_wait=0; no_preflight=0; args=()
+lane=""; task=""; series=""; reason=""; eta=30; force=0; force_shared=0; message_file=""; do_wait=0; no_preflight=0; args=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --lane)   lane="${2:?--lane needs a value}"; shift 2 ;;
     --task)   task="${2:?--task needs a value}"; shift 2 ;;
     --series) series="${2:?--series needs a value}"; shift 2 ;;
+    --reason) reason="${2:?--reason needs a value}"; shift 2 ;;
     --eta)    eta="${2:?--eta needs a value}"; shift 2 ;;
     --message-file)
       [ $# -ge 2 ] && [ -n "$2" ] || { echo "dispatch.sh: --message-file needs a value" >&2; exit 2; }
@@ -106,7 +124,36 @@ fi
 case "$message" in -*|@*) message=$'\n'"$message" ;; esac
 [ -n "$lane" ] || { echo "dispatch.sh: --lane required" >&2; exit 2; }
 [ -n "$task" ] || { echo "dispatch.sh: --task required" >&2; exit 2; }
+# Digits only, then read as DECIMAL. A bare `$((eta * 60))` later treats a
+# leading zero as octal: `08`/`09` abort the script (the ticket's audit) and
+# `010` silently means 8 minutes. 10# is bash's explicit-decimal base.
 case "$eta" in ''|*[!0-9]*) echo "dispatch.sh: --eta must be an integer number of minutes" >&2; exit 2 ;; esac
+eta=$((10#$eta))
+
+# A pipe is refused unless --wait was given — on EITHER stream. The detached
+# worker's subshell inherits this process's stdout AND stderr and lives as long
+# as the worker, so a caller reading either through a pipe stays blocked until
+# the worker exits. On ticket 290 a `| grep -v … | tail` held the call for its
+# 180-second limit, and stopping it killed the worker; redirecting stdout to a
+# file while stderr still went to a pipe would block exactly the same way. A
+# pipe is fine with --wait, which returns when the worker does.
+#
+# FIFO only is not enough: an agent harness (Claude Code's Bash tool, Pi itself)
+# gives its children AF_UNIX socketpairs as stdio, which fail `-p` and pass
+# `-S` — and the harness waits for EOF on the socket just as it would on a pipe.
+# A tty is `-c` and a redirect is `-f`, so neither is refused. Both tests follow
+# /dev/stdout and /dev/stderr to the real descriptor.
+if [ "$do_wait" = 0 ] && { [ -p /dev/stdout ] || [ -S /dev/stdout ] \
+                        || [ -p /dev/stderr ] || [ -S /dev/stderr ]; }; then
+  {
+    echo "dispatch.sh: refusing — stdout or stderr is a pipe and --wait was not given."
+    echo "  The worker's subshell holds both streams open until the worker exits, so a pipe"
+    echo "  caller blocks on it — and killing the caller kills the worker. Two ways out:"
+    echo "    redirect to files:  dispatch.sh ... > /tmp/dispatch.out 2>&1"
+    echo "    or wait for it:     dispatch.sh ... --wait"
+  } >&2
+  exit 2
+fi
 
 # Resolve a symlink chain to the real file before locating lib/: run through a
 # link in ~/bin, $BASH_SOURCE is the link, not the checkout that holds lib/.
@@ -165,6 +212,27 @@ fi
 # is the documented escape). Any HTTP status (401 included) is a response and counts
 # as reachable; the 2026-10-10 failure was curl exit 35, connection reset, no response.
 # DISPATCH_PREFLIGHT_URL short-circuits the lookup and is what the tests use.
+#
+# The provider's hosts bypass the proxy first (ticket 321). A NAMED list, not
+# "the provider's host": a provider outside China needs the proxy. Appended to
+# NO_PROXY and no_proxy and exported, so the preflight curl below and the worker
+# launched further down both go direct; a caller's own entries are kept, the
+# list only adds. This is what a caller's window cannot be trusted to supply —
+# VS Code hands each window the environment it captured at launch, which is why
+# build 2 typed the prefix by hand nine times. DISPATCH_BYPASS_HOSTS replaces the
+# list (comma-separated, as NO_PROXY); set it empty to add nothing.
+bypass_hosts="${DISPATCH_BYPASS_HOSTS-deepseek.com,.deepseek.com,api.deepseek.com}"
+if [ -n "$bypass_hosts" ]; then
+  # Keep the caller's entries on BOTH variables: a window that exports only one
+  # (VS Code, a harness) must not lose its other bypasses here. clip/Node/Python
+  # read lowercase `no_proxy` first and Go reads uppercase `NO_PROXY` first, so
+  # whichever the caller set seeds the other before the list is appended.
+  NO_PROXY="${NO_PROXY:-${no_proxy:-}}"
+  no_proxy="${no_proxy:-$NO_PROXY}"
+  NO_PROXY="${NO_PROXY:+${NO_PROXY},}${bypass_hosts}"
+  no_proxy="${no_proxy:+${no_proxy},}${bypass_hosts}"
+  export NO_PROXY no_proxy
+fi
 preflight_url="${DISPATCH_PREFLIGHT_URL:-}"
 if [ "$no_preflight" = 0 ]; then
   if [ -z "$preflight_url" ]; then
@@ -178,8 +246,37 @@ if [ "$no_preflight" = 0 ]; then
   if [ -z "$preflight_url" ]; then
     echo "dispatch.sh: preflight skipped — no API base URL known for model '${model}'" >&2
   else
+    # The preflight's two ways of being un-runnable are named as themselves: a
+    # missing curl and a baseUrl that is not a URL string both used to read as
+    # "the worker cannot reach its model's API", which is a different fault and a
+    # different fix. DISPATCH_CURL is the test seam for the missing-curl case.
+    curl_cmd="${DISPATCH_CURL:-curl}"
+    if ! command -v "$curl_cmd" >/dev/null 2>&1; then
+      {
+        echo "dispatch.sh: refusing — curl is missing, and the preflight needs it before launch."
+        echo "    looked for: ${curl_cmd}"
+        echo "    model:      ${model}"
+        echo "    url:        ${preflight_url}"
+        echo "  This is not a network fault: nothing ran the request. Install curl, or pass"
+        echo "  --no-preflight to launch without the check."
+      } >&2
+      exit 5
+    fi
+    case "$preflight_url" in
+      http://*|https://*) ;;
+      *)
+        {
+          echo "dispatch.sh: refusing — the model's API baseUrl is not a URL string."
+          echo "    model:   ${model}"
+          echo "    baseUrl: ${preflight_url}"
+          echo "  Read from \$PI_CODING_AGENT_DIR/models.json, providers[\"<provider>\"].baseUrl."
+          echo "  Set it to an http(s) URL, or pass --no-preflight to launch without the check."
+        } >&2
+        exit 5
+        ;;
+    esac
     preflight_rc=0
-    preflight_err="$(curl -q -sS -o /dev/null --max-time 10 -- "$preflight_url" 2>&1)" || preflight_rc=$?
+    preflight_err="$("$curl_cmd" -q -sS -o /dev/null --max-time 10 -- "$preflight_url" 2>&1)" || preflight_rc=$?
     if [ "$preflight_rc" != 0 ]; then
       {
         echo "dispatch.sh: refusing — the worker cannot reach its model's API before launch."
@@ -187,9 +284,11 @@ if [ "$no_preflight" = 0 ]; then
         echo "    url:   ${preflight_url}"
         echo "    error: curl exit ${preflight_rc}: ${preflight_err}"
         echo "  Any HTTP status (401 counts) means reachable; no response does not."
-        echo "  Next check: the same request with the proxy bypassed (it answered in 0.14 s on 2026-10-10):"
-        echo "    curl --noproxy '*' -sS -o /dev/null -m 10 '${preflight_url}'"
-        echo "  If that answers, add the host to NO_PROXY (and no_proxy) before re-dispatching."
+        echo "  The bypass list this dispatch applied: ${bypass_hosts:-<none>}"
+        echo "  Next check: the same request through the proxy your shell exports:"
+        echo "    curl -sS -o /dev/null -m 10 '${preflight_url}'"
+        echo "  If that answers and this one does not, the proxy is the way in: re-run with"
+        echo "  DISPATCH_BYPASS_HOSTS= (and drop the host from your own NO_PROXY)."
       } >&2
       exit 5
     fi
@@ -206,9 +305,15 @@ fi
 # hold the gate shut until a human deleted files by hand.
 #
 # A record with no pid yet is the half-second between dispatch.sh's first write
-# and the subshell publishing the pid. `record_in_flight` below holds it until
-# its deadline (or a day from its mtime when the deadline is unreadable), then
-# releases it — see that function for the full predicate.
+# and the subshell publishing the pid. `record_in_flight` in lib/in-flight.sh
+# holds it until its deadline (or a day from its mtime when the deadline is
+# unreadable), then releases it — see that function for the full predicate.
+#
+# This scan is also where a record whose worker is dead and that never closed
+# gets closed (task 341): `finished` written, `exit_code: -1` ("the worker was
+# lost, not seen to exit"), its .pid file removed. Nothing else ever closed those,
+# so one killed subshell left a record that orchestrator-count.sh reported DEAD
+# forever and a .pid file beside it.
 #
 # Records are machine-local and gitignored (ADR 0086), so this only ever sees
 # what is on this machine's disk. That is the whole scope of the rule.
@@ -217,75 +322,10 @@ fi
 # the shared main checkout every worktree resolves to.
 this_tree="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
-record_field() { # <record file> <key> — our writer emits one "key": value per line.
-  sed -n "s/^[[:space:]]*\"$2\":[[:space:]]*//p" "$1" | head -1 \
-    | sed -e 's/^"//' -e 's/",\{0,1\}[[:space:]]*$//' -e 's/,[[:space:]]*$//'
-}
-
-# A record is in flight when it has no `finished` AND its worker is not provably
-# gone. A live pid is the proof. A record written before the pid was known (the
-# parent writes the pid a moment later, and a crash in that window leaves it
-# null) is held only until its own `deadline`, or a day past its mtime when the
-# deadline is missing or unreadable: either way a pid-less open record stops
-# holding the gate, because past that it can never prove it is alive.
-now_epoch="$(date -u +%s)"
-file_mtime() { # <file> -> epoch seconds, empty if unavailable
-  # GNU first: BSD `stat -c` fails cleanly with no stdout, but GNU `stat -f %m`
-  # reads -f as --file-system and prints a filesystem block, so the old order put
-  # junk in $bound on Linux and the arithmetic below would abort.
-  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || true
-}
-rif_pid=""        # the effective pid the last record_in_flight() call found
-rif_reason=""     # live-pid | pidfile | young-pidless | no-deadline
-record_in_flight() { # <record file>
-  local rec="$1" finished pid dl dl_epoch pf bound
-  rif_pid=""; rif_reason=""
-  finished="$(record_field "$rec" finished)"
-  [ -z "$finished" ] || [ "$finished" = null ] || return 1
-  pid="$(record_field "$rec" pid)"
-  # A pid-less record whose worker is alive: the sibling pid file is written for
-  # the worker's whole lifetime, so use it before the deadline rule. This covers
-  # a failed pid write that left the initial (pid-less) record in place.
-  if [ -z "$pid" ] || [ "$pid" = null ]; then
-    pf="$(dirname "$rec")/.$(basename "$rec" .json).pid"
-    if [ -s "$pf" ]; then
-      pid="$(cat "$pf" 2>/dev/null || true)"
-      [ -n "$pid" ] && rif_reason="pidfile"
-    fi
-  fi
-  if [ -n "$pid" ] && [ "$pid" != null ]; then
-    if kill -0 "$pid" 2>/dev/null; then
-      rif_pid="$pid"
-      [ -n "$rif_reason" ] || rif_reason="live-pid"
-      return 0
-    fi
-    return 1                                   # worker is gone: stale record
-  fi
-  dl="$(record_field "$rec" deadline)"
-  dl_epoch=""
-  if [ -n "$dl" ] && [ "$dl" != null ]; then
-    dl_epoch="$(epoch_from_iso "$dl")"
-  fi
-  # An empty or null deadline is never handed to GNU date (its `-d ""` means
-  # today's 00:00, which would release the record on Linux); an unparseable one
-  # comes back empty from epoch_from_iso. All three are bounded by the record's
-  # mtime + 24h instead, so nothing can refuse a tree forever — and the refusal
-  # note below says so, rather than claiming a deadline it could not read.
-  if [ -z "$dl_epoch" ]; then
-    bound="$(file_mtime "$rec")"
-    case "$bound" in ''|*[!0-9]*) bound="" ;; esac
-    if [ -n "$bound" ] && [ "$((bound + 86400))" -lt "$now_epoch" ]; then
-      return 1
-    fi
-    rif_reason="no-deadline"
-    return 0
-  fi
-  if [ "$dl_epoch" -lt "$now_epoch" ]; then
-    return 1
-  fi
-  rif_reason="young-pidless"
-  return 0
-}
+# One shared predicate with ticket.sh's ceiling check (task 341): the reasons,
+# the deadline rule and the mtime fallback all live in lib/in-flight.sh, so the
+# two callers cannot drift into counting different dispatches.
+source "${script_dir}/lib/in-flight.sh"
 
 pi_in_flight=0          # how many Pi dispatches are live right now
 blocking_lane=""        # a live one already on THIS working tree, if any
@@ -294,7 +334,10 @@ blocking_pid=""
 blocking_reason=""
 while IFS= read -r rec; do
   [ -n "$rec" ] || continue
-  record_in_flight "$rec" || continue
+  if ! record_in_flight "$rec"; then
+    close_lost_record "$rec" || true
+    continue
+  fi
   [ "$(record_field "$rec" worker)" = "pi" ] || continue
   pi_in_flight=$((pi_in_flight + 1))
   rec_tree="$(record_field "$rec" worktree)"
@@ -364,6 +407,21 @@ fi
 
 ts="$(date -u +%Y%m%dT%H%M%SZ)"
 stem="${lane}-${ts}"
+# Two dispatches of one lane in the same second share a filename, and the second
+# record used to overwrite the first — a worker that died at once and was sent
+# back within the second lost the earlier record (`lands.tsv` counts records, so
+# `dispatches` read one short). The second gets a `_NN` suffix: the `${lane}-*`
+# glob every reader uses still matches it, and the name still starts with
+# `<lane>-<ts>`. The ORDER between two records of one second is not something a
+# filename can promise (glob and `sort` collate `_` against `.` by locale, and the
+# opposite way in C), so a reader that needs the newer one compares the record's
+# `started` first and the padded suffix second — see `send_back_reason` and
+# `cmd_status` in ticket.sh.
+seq_n=1
+while [ -e "${dispatch_dir}/${stem}.json" ]; do
+  seq_n=$((seq_n + 1))
+  stem="${lane}-${ts}_$(printf '%02d' "$seq_n")"
+done
 log_path="${dispatch_dir}/${stem}.log"
 record_path="${dispatch_dir}/${stem}.json"
 pid_file="${dispatch_dir}/.${stem}.pid"
@@ -399,6 +457,7 @@ write_record() {
   "lane": "$(json_escape "$lane")",
   "task": "$(json_escape "$task")",
   "series": "$(json_escape "$series")",
+  "reason": "$(json_escape "$reason")",
   "worker": "pi",
   "worktree": "$(json_escape "$this_tree")",
   "pid": ${pid_json},
@@ -463,9 +522,6 @@ write_record "null" "null" "null"
 ) &
 disown 2>/dev/null || true
 
-# Hold the machine awake while --wait waits. `-w $$` ties caffeinate's life to
-# this process, so it exits on its own when the wait is over — no kill needed
-# (and killing it races its own startup, as the test caught).
 
 # worker_pid may still be empty if the subshell hasn't scheduled yet — or because
 # the worker failed fast and the subshell already finished and removed the pid
@@ -513,12 +569,42 @@ fi
 # caffeinate, keep the Mac awake doing it: a dead worker gets a 5 s grace for its
 # closing write, then exit 6. A closed record with no
 # exit_code is unknown, never success.
+#
+# The WHOLE wait also has an upper bound (task 342): the record's own deadline
+# plus WAIT_GRACE. ask-pi has no timeout, so a worker that wedges would otherwise
+# hold the waiter (and caffeinate) for ever. The deadline is READ FROM THE RECORD
+# — the same field a poller reads — with this run's in-process deadline as the
+# fallback when it is missing or unreadable. Stopping the wait does not stop the
+# worker: it is disowned, and the record stays its handle. 300 s covers a worker
+# that answers at its deadline and then writes its closing record; a longer grace
+# would let a wedged worker hold a caller for hours at a long --eta.
+WAIT_GRACE="${DISPATCH_WAIT_GRACE:-300}"
+case "$WAIT_GRACE" in ''|*[!0-9]*) WAIT_GRACE=300 ;; esac
 if [ "$do_wait" = 1 ]; then
+  # Read the deadline into a variable first: an empty or null one must never reach
+  # epoch_from_iso, because GNU `date -d ""` means TODAY'S 00:00 (Linux) and the
+  # bound would land in the past, exiting 6 at once. lib/in-flight.sh avoids the
+  # same trap the same way. This run's own deadline is the fallback.
+  wait_dl="$(record_field "$record_path" deadline || true)"
+  wait_bound=""
+  if [ -n "$wait_dl" ] && [ "$wait_dl" != null ]; then
+    wait_bound="$(epoch_from_iso "$wait_dl")"
+  fi
+  case "$wait_bound" in ''|*[!0-9]*) wait_bound="$deadline_epoch" ;; esac
+  wait_bound=$((wait_bound + WAIT_GRACE))
   gone_polls=0
   empty_pid_polls=0
   while :; do
+    # The closed record is read BEFORE the bound: a worker that closed between
+    # two polls must get its own exit code, not "unknown fate" because 300 s
+    # happened to end in the same 0.2 s.
     wait_finished="$(record_field "$record_path" finished || true)"
     if [ -n "$wait_finished" ] && [ "$wait_finished" != null ]; then break; fi
+    if [ "$(date -u +%s)" -ge "$wait_bound" ]; then
+      echo "dispatch.sh: --wait stopped ${WAIT_GRACE}s after the record's deadline; worker ${worker_pid:-?} may still be running — poll the record: ${record_path}" >&2
+      tail -n 20 "$log_path"
+      exit 6
+    fi
     # The pid may still be unknown if the pid file and the record's pid write both
     # lost. Re-read it here, and treat a worker that never becomes identifiable as
     # the same unknown-fate exit rather than an unbounded spin.
@@ -550,6 +636,13 @@ if [ "$do_wait" = 1 ]; then
     sleep 0.2
   done
   wait_rc="$(record_field "$record_path" exit_code || true)"
+  # -1 is the closer's mark (lib/in-flight.sh) for a record some other run closed
+  # as lost. That is the unknown fate exit 6 names, not a worker code 255.
+  if [ "$wait_rc" = -1 ]; then
+    echo "dispatch.sh: the record was closed as lost (exit_code -1); the worker's fate is unknown — see ${log_path}" >&2
+    tail -n 20 "$log_path"
+    exit 6
+  fi
   if [ -z "$wait_rc" ] || [ "$wait_rc" = null ]; then
     echo "dispatch.sh: the record closed with no exit_code; the worker's fate is unknown — see ${log_path}" >&2
     tail -n 20 "$log_path"
