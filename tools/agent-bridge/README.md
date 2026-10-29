@@ -9,26 +9,36 @@ relaying messages between them.
 | `ask-claude "<msg>"` | Pi → Claude Code. Claude answers with read-only tools — it reviews, Pi edits. |
 | `lane new <name> --owns <path>` · `lane who [path]` | Claims a session id + owned paths (optionally its own worktree) and prints a paste-ready coordinates block for a second terminal window. **Refuses a tree another live Claude session holds** (task 107, see below); `lane who` shows who is in a tree. |
 | `lane prune [--apply] [--all]` | Lists lanes whose session is not live and whose branch is merged into `origin/main`, whose branch is gone, or whose worktree folder is missing; a Pi lane is judged from its dispatch records (kept while a worker is in flight, otherwise listed like a `STALE` lane); `--apply` drops exactly those registry rows — never a worktree or a branch. `--all` also shows the lanes it keeps and why. See below. |
-| `merge-pr.sh [--match-head <sha>] <pr>` | **The merge path (task 156).** `--match-head` (optional) pins the merge to a checked head via `gh pr merge --match-head-commit`. Runs `lane reviews <pr>` first and refuses to call `gh pr merge --merge` while any review claim on the PR is open, then prints the PR's state after the merge so the caller sees that it merged without a second call (task 343). The orchestrator and the COO merge through this, never a raw `gh pr merge`. |
+| `lane widen <name> <path>[,<path>…] [--share]` | **Adds owned paths to an existing lane, in one logged command** (task 427), so nobody edits `lanes.tsv` by hand. Takes the registry lock, so two widens started together both land; refuses a lane the registry does not hold (never claimed, or released), and refuses a path another **live** lane owns — naming that lane — unless `--share` says the pairing is deliberate; reads the same overlap predicate `lane new`'s warnings do. A path the lane already owns is a no-op, said in one line (as is any widen of a whole-repo lane, whose empty `owns` cell must not be narrowed). `pr/<n>` is not widenable (that is `lane review`). Prints the lane's new owned paths. See below. |
+| `merge-pr.sh [--match-head <sha>] <pr>` | **The merge path (task 156).** The merge is REST — `gh api -X PUT …/pulls/<n>/merge -f merge_method=merge` — because the daily drain's cloud routine has no GraphQL and every `gh` subcommand is a 403 there (task 357). `--match-head` (optional) pins it with REST's `sha` field; 409 (head moved) and 405 (not mergeable) are turned into sentences instead of raw errors. Runs `lane reviews <pr>` first and refuses to merge while any review claim on the PR is open, then prints the PR's state after the merge so the caller sees that it merged without a second call (task 343). The orchestrator and the COO merge through this, never a raw merge. |
 | `docs-only.sh <pr>` · `docs-only.sh <base> <head>` · `docs-only.sh --paths` | Is a pull request docs-only? (task 355, implements the ADR 0085 addendum of 2026-10-19.) Exit 0 only when every entry of `git diff --no-renames --raw <base>...<head>` is an Add or Modify of a regular (mode `100644`) `.md`/`.html` file under a path the addendum lists, and — for `tasks/inbox/` — an Add only. Exit 1 names the first offending entry and why; exit 2 could not run. `--paths` prints the rule for the parity test, which parses the ADR text and fails when the two disagree: the ADR is the source. |
 | `land-docs-only.sh <pr>` | **Lands a docs-only PR with no review cycle** (task 355, ADR 0141 decision 1). Nothing else: `docs-only.sh` must pass, `git merge-tree --write-tree origin/main <head>` must be clean, `check-task-filed.sh --count` must be 0 and `scripts/pr-precheck.sh origin/main` must find no BLOCK — then it hands over to `merge-pr.sh`, so an open review claim still blocks. It fetches origin main and the PR head ref first (a failed fetch is exit 2), reads the PR head SHA once, runs every gate on that SHA and merges with `--match-head <sha>`. It refuses unless HEAD is the PR's own head (the gates read the tree they stand in), never schedules itself, and never applies a migration or deploys. |
+| `drain/gate-marker.sh get <pr>` · `set <pr> <sha> <GREEN\|YELLOW\|RED>` · `skip <pr> <head-sha>` · `refused <pr> <sha>` · `refuse <pr> <sha>` | **The daily drain's memory, and what it may do with it (task 357, ADR 0141).** The drain runs in a fresh cloud clone every day, so the last head it gated is a hidden comment on the pull request (`<!-- daily-drain gated: <sha> <verdict> -->`) rather than local state. `get` prints `<sha> <verdict>` for the latest marker and ignores any verdict word other than GREEN, YELLOW or RED; exit 1 when it was never gated. `set` posts one, after the outcome is known. **`skip` is the step-3d decision, so the rule lives in one place:** it prints `gate — …` or `skip — …`, and it skips only a `RED` at the current head (waiting for the author) or a non-GREEN verdict while the pull request still carries the `needs-brendan` label. A `GREEN` marker is always re-gated — a marker never authorises a landing — and so is a `YELLOW` once his ruling has landed and the label is gone. `refused` counts the recorded refusals at a head and `refuse` records one, so a second consecutive refusal to land a GREEN is routed to the issue instead of being re-gated every day. |
+| `drain/act.sh <cmd…>` | **The one mutation guard (task 357, ADR 0141 decision 9).** DRY_RUN is the default and `DAILY_DRAIN_LIVE=1` is the only way into live mode: under DRY_RUN it prints `WOULD: <cmd>` and returns 0 without running anything, and in live mode it runs the command and returns its status. Everything the procedure mutates goes through it — `merge-pr.sh`, `land-docs-only.sh`, `git push`, every REST write (comments, labels, `state=closed`, a new pull request), and a fixer sub-agent's push. It is a script rather than only a function because a Bash call, and a sub-agent, share no shell state. |
+| `drain/waits-on-brendan.sh <pr>` | **The one "is this held on Brendan?" test (task 357).** Prints `waiting on Brendan` / `not waiting on Brendan` and exits 0 / 1 (2 = gh could not read). The rule: the `needs-brendan` label, a heading mentioning "for Brendan" (`## For Brendan`, `## Questions for Brendan`), or a `**For Brendan:**` lead-in; `## Nothing for Brendan` is not an item. Step 3a gates landing on it and `drain/age-cap.sh` decides holding with it, so the two cannot disagree. Read-only. |
+| `drain/waiting-on-brendan.sh [--items <file>]` | **Rewrites the ONE issue titled exactly `Waiting on Brendan`** (task 357, ADR 0141 decision 3) from two sources: items on stdin or in a file, one `<ref>` TAB `<question>` per line, **plus an item for every open pull request carrying the `needs-brendan` label**, every run — which is what keeps a routed question on the issue until the label comes off. Body: one row per item with the question, the link, the first-seen date and the days waited, ⚠️ at 14 days; items waiting on him are never closed. It keeps the previous first-seen dates in a hidden marker, @-mentions `bsingbeil` **only** for items new since the last run, always writes `Last daily drain run: <UTC ISO>` (task 358's heartbeat reads that line), and lands a `workspaces/coo/decisions/PENDING/` entry per new item **before** it rewrites the issue, so a failed landing is retried rather than reported as done — on main through `lib/land-on-main.sh`, or into `PENDING_DIR` when that seam is set. Any failed `gh` read is exit 2 having written nothing: could-not-check must never file a second issue. |
+| `drain/age-cap.sh <pr>` | Prints `close`, `flag` or `keep` and a reason, from the newer of the head commit date and the newest comment that is neither a bot's nor the drain's own (anything carrying `<!-- daily-drain`). `close` at 14 days author-side, with the branch kept; `flag` for a pull request waiting on Brendan at 14 days, which is never closed. Waiting on Brendan is `lib.sh: waits_on_brendan` — the `needs-brendan` label or a For-Brendan section — the **same** test step 3a gates landing on, so the two cannot disagree. Read-only. |
+| `drain/run-record.sh --gated N --landed N --closed N --routed N [--conflict <file>]…` | Appends one line per run to `workspaces/coo/reports/daily-drain-YYYY-MM.md` — gated, landed, closed, routed, and the conflicts resolved by hand per file (`--conflict` repeated, once per file per merge) — for ADR 0141 decision 7's month-later decision about splitting the shared table files. Once a week it also appends the weekly line for the week that just ended, which replaces the retired weekly trunk-sync report (decision 10). `DRAIN_REPORT_DIR` moves the folder (tests). |
 | `lane-guard pre` · `lane-guard notices` | The Claude Code hook (`.claude/settings.json`, project scope): `pre` refuses a write in a tree another live session holds (task 154, see below); `notices` delivers the holding session its co-tenant notices. |
-| `session-start-notice` · `session-start-notice --install` · `session-start-notice --check` | The Claude Code **`SessionStart` hook** (task 297; JSON form, installed copy and one-line rule, task 326): reads the hook's JSON on stdin and, when the session's folder is the repository's **main checkout** and that repository has at least one linked worktree, prints the hook's JSON — a `systemMessage` for the person and the same line as `hookSpecificOutput.additionalContext` (`hookEventName: "SessionStart"`) for the model: this is the shared checkout, the branch it is on, how many commits it is behind `origin/main` as last fetched (never fetches), and to open the worktree folder as the workspace (`lane ls` lists them). Silent and exit 0 in every other case (bad input, no git, any internal failure), ~0.15 s a run. `--install` copies the script to `~/.claude/hooks/session-start-notice` and prints that path for the user-scope entry; `--check` exits 1 and names the difference when that copy is missing, stale or not executable. The installed copy stands down when the checkout's own `.claude/settings.json` registers the hook, so a session gets one line, not two. `SESSION_START_NOTICE_HOME` replaces `~/.claude` (tests only). A hook, not a command: run by path, never symlinked — see below. |
-| `dispatch.sh --lane <name> --task <id> [--series <s>] [--eta <min>] [--message-file <path>] [--wait] [--no-preflight] [--force] [--force-shared-checkout] ["<msg>"]` | Backgrounds an `ask-pi` call and leaves a JSON status record under `.claude/dispatch/` for polling instead of blocking. `--message-file` takes the brief from a file; `--wait` blocks for the worker and returns its exit code, stopping at the record's deadline plus `DISPATCH_WAIT_GRACE` (300 s, then exit 6); `--eta` digits are decimal (`08` is 8 minutes, never octal); a preflight refuses (exit 5) when it cannot prove the worker will reach its model's API — no HTTP response, **curl missing**, or a `baseUrl` that is not a URL string, each named as itself. **Enforces ADR 0086's two concurrency rules before it launches anything** — see below. |
-| `ticket.sh start --series <s> --task <NNN-slug> --owns <paths> --eta <min> --brief <file> [--wait] [--force] [--force-battery]` · `ticket.sh redispatch --series <s> --task <NNN-slug> --eta <min> --brief <file> [--wait] [--force] [--force-battery]` · `ticket.sh land <pr> --reviewed <sha> [--read-unreviewed] [--dry-run] --fail-first <suite> [args…]` · `ticket.sh status <NNN-slug \| lane>` · `ticket.sh workers` | **Start a ticket, send it back, land it, and see where it stands with one command each (tasks 292, 322 and 342).** `start` refuses a task the ready list does not name, prints one power line and **refuses before it makes anything** when the Mac is on battery below 7% (`--force-battery` overrides) or the machine's Pi ceiling is already held (the refusal lists every dispatch in flight: lane, task, started, deadline; `--force` is the bypass and reaches `dispatch.sh --force`), cuts `ticket/<s>-<NNN>` from `build/<s>` with no upstream, claims the Pi lane (the ticket's task files are added to its owned paths) and dispatches from the new worktree with `--message-file`, passing `--wait` through. **Every exit after it cut the branch rolls the branch, lane and worktree back, says so and can be run again.** `redispatch` sends a ticket back on the lane and worktree it already has, with a new brief. `status` and `workers` are the **read-only lander view**: one ticket's records, worker reply, PR, commits, last reviewed sha and `## Review`, or every dispatch in flight on the machine. `land` runs the lander check's five mechanical steps in order (`tasks/README.md` §The lander check), prints the diff since `--reviewed`, then merges through `merge-pr.sh`, fast-forwards `build/<s>`, removes the lane, worktree and ticket branch, and appends one `lands.tsv` row under a header row — dispatches, rounds, verdicts, models, send-backs, the unreviewed lines and the seconds asleep beside the eight columns build 2 had (task 320; the table below is the contract). See below. |
-| `fail-first.sh --suite <test file> --restore <path>[,<path>…] --from <ref>` · `fail-first.sh --suite <test file> --env NAME=VALUE` · `fail-first.sh --copy [--restore <paths> --from <ref>]` · `fail-first.sh --remove <path>` | **One command proves a ticket's new test fails on the old code (task 319).** Run from the ticket worktree: it copies the worktree's tracked files to a temp folder, puts the named paths back as `<ref>` had them (a path `<ref>` did not have is removed), and runs the suite once on the tip and once in the copy — `--env` does the second run with a seam set instead. Each run prints its exit code and its `^ok`/`^FAIL` counts plus the first FAIL lines, and the row a land records gets one `result:` line. Exit `0` only when the tip passed and the second run failed; `1` when it proved nothing (the tip failed, or both runs passed); `2` a refusal that ran nothing — no restored path differed from the tip, the suite file is missing, `<ref>` does not resolve, or `mktemp` failed. The copy is a git repository (the suites read the repo they sit in) and one function makes and removes it, refusing an empty path. `--copy` makes that guarded copy, prints it and leaves it for a review lens; `--remove` takes it away and refuses a path it did not make. `ticket.sh land --fail-first` runs it. Tests: `tests/fail-first.test.sh`. |
-| `orchestrator-count.sh [--quiet]` | The only scheduled counter: counts unfiled done-tasks, overdue dispatch records, stale PRs, and (task 079) any loaded `com.navigate*`/`com.navigateops.*` launchd job sitting at a non-zero, non-`-` exit status. Own exit codes: `0` nothing crossed, `2` something crossed AND every escalation of it landed in `PENDING/`, `1` a crossing's escalation FAILED to land (or the script couldn't establish its own bearings), `64` bad usage — `2` is reserved for "found something and told someone", never conflated with a real failure. Run under `run-job.sh`, which maps that `2` to a clean launchd status; see its header for the full contract. |
-| `<report-lines> \| escalate-crossing.sh <kind>` | The "tell someone" half of the counter: turns a crossing into one file per finding kind in `workspaces/coo/decisions/PENDING/`, landed on `main` through a throwaway worktree. Re-runs update that file rather than piling up duplicates. Called by `orchestrator-count.sh`, not by hand. |
+| `pi-guard/install.sh [--install] [--check] [--into <dir>]` | **The Pi worker guard's installer (task 365).** Copies the `tool_call` extension `pi-guard/index.js` to `~/.pi/agent/extensions/navops-pi-guard/`, where every Pi session on this Mac loads it; `--check` exits 1 and names the copy when it is missing, stale or the folder holds a stray file. The installed guard is **inert** unless the session was launched by `dispatch.sh` (`NAVOPS_PI_WORKER=1`, `NAVOPS_PI_WORKTREE=<worktree>`), and then refuses a force-push, `pkill`/`killall`/`kill` of a pid it did not start, and any command that leaves the worktree — each with the Worker rule and the allowed alternative. `PI_GUARD_DIR` moves the folder (tests). See §The Pi worker guard. |
+| `session-start-notice` · `session-start-notice --install` · `session-start-notice --check` | The Claude Code **`SessionStart` hook** (task 297; JSON form, installed copy and one-line rule, task 326): reads the hook's JSON on stdin and, when the session's folder is the repository's **main checkout** and that repository has at least one linked worktree, prints the hook's JSON — a `systemMessage` for the person and the same line as `hookSpecificOutput.additionalContext` (`hookEventName: "SessionStart"`) for the model: this is the shared checkout, the branch it is on, how many commits it is behind `origin/main` as last fetched (never fetches), and to open the worktree folder as the workspace (`lane ls` lists them). **Task 360 adds a second, independent line**: while the counter has a `finished-not-landed` crossing open, one sentence names the worker's ticket, when it finished and how to land it — and that one prints in **any** folder of the repository, main checkout or linked worktree, so it is actually seen where the worker ran. The two are joined into the same one line of JSON when both are due. Silent and exit 0 when neither is (bad input, no git, any internal failure), ~0.15 s a run. `--install` copies the script to `~/.claude/hooks/session-start-notice` and prints that path for the user-scope entry; `--check` exits 1 and names the difference when that copy is missing, stale or not executable. The installed copy stands down when the checkout's own `.claude/settings.json` registers the hook **and** its copy is new enough to print what is due (the JSON form, and, with a crossing open, a copy that knows the finished-worker line), so a session gets one line, not two. `SESSION_START_NOTICE_HOME` replaces `~/.claude` (tests only). A hook, not a command: run by path, never symlinked — see below. |
+| `dispatch.sh --lane <name> --task <id> [--series <s>] [--eta <min>] [--message-file <path>] [--wait] [--no-preflight] [--force] [--force-shared-checkout] ["<msg>"]` | Backgrounds an `ask-pi` call and leaves a JSON status record under `.claude/dispatch/` for polling instead of blocking. `--message-file` takes the brief from a file; `--wait` blocks for the worker and returns its exit code, stopping at the record's deadline plus `DISPATCH_WAIT_GRACE` (300 s, then exit 6); `--eta` digits are decimal (`08` is 8 minutes, never octal); a preflight refuses (exit 5) when it cannot prove the worker will reach its model's API — no HTTP response, **curl missing**, or a `baseUrl` that is not a URL string, each named as itself. **Enforces ADR 0086's two concurrency rules before it launches anything** — see below. Every worker it launches **starts without the tools named in `DISPATCH_EXCLUDE_TOOLS`** (default `readSeek_edit,task_plan`; empty excludes nothing — `${VAR-default}`, not `${VAR:-default}`), handed to `ask-pi --exclude-tools` and by ask-pi to `pi`'s own `--exclude-tools`, so a worker edits with Pi's built-in tools instead of losing readSeek anchors and Brendan's own `ask-pi` calls are unchanged (ticket 375). |
+| `ticket.sh start --series <s> --task <NNN-slug> --owns <paths> --eta <min> --brief <file> [--wait] [--force] [--force-battery] [--force-load]` · `ticket.sh redispatch --series <s> --task <NNN-slug> --eta <min> --brief <file> [--wait] [--force] [--force-battery] [--force-load]` · `ticket.sh land <pr> --reviewed <sha> [--read-unreviewed] [--dry-run] --fail-first <suite> [args…]` · `ticket.sh status <NNN-slug \| lane>` · `ticket.sh workers` | **Start a ticket, send it back, land it, and see where it stands with one command each (tasks 292, 322 and 342).** `start` refuses a task the ready list does not name, prints one power line and **refuses before it makes anything** when the Mac is on battery power at any level (`--force-battery` overrides), when the 5-minute load average is at or above `START_MAX_LOAD` (default 100; `--force-load` overrides, and the refusal prints the load and the top three processes by CPU) or when the machine's Pi ceiling is already held (the refusal lists every dispatch in flight: lane, task, started, deadline; `--force` is the bypass and reaches `dispatch.sh --force`), cuts `ticket/<s>-<NNN>` from `build/<s>` with no upstream, claims the Pi lane (the ticket's task files, and each source's generated outputs from the **source → generated-output table** beside `land`'s stays-in-lane check, are added to its owned paths — one `generated <path>` line printed per output added) and dispatches from the new worktree with `--message-file`, passing `--wait` through. **Every exit after it cut the branch rolls the branch, lane and worktree back, says so and can be run again.** `redispatch` sends a ticket back on the lane and worktree it already has, with a new brief. `status` and `workers` are the **read-only lander view**: one ticket's records, worker reply, PR, commits, last reviewed sha and `## Review`, or every dispatch in flight on the machine. `land` runs the lander check's five mechanical steps in order (`tasks/README.md` §The lander check), prints the diff since `--reviewed`, then merges through `merge-pr.sh`, fast-forwards `build/<s>`, removes the lane, worktree and ticket branch, and appends one `lands.tsv` row under a header row — dispatches, rounds, verdicts, models, send-backs, the unreviewed lines and the seconds asleep beside the eight columns build 2 had (task 320; the table below is the contract). **A step-2 refusal names the machine's load** (task 428): its first line carries the 1- and 5-minute load averages and the lines after it the top three processes by CPU, reusing 361's readers and printer, and `LAND_MAX_LOAD=<n>`, unset by default, refuses to start step 2 above that 1-minute average. See below. |
+| `fail-first.sh --suite <test file> --restore <path>[,<path>…] --from <ref>` · `fail-first.sh --suite <test file> --env NAME=VALUE` · `fail-first.sh --cmd '<command>' --restore <paths> --from <ref>` · `fail-first.sh --copy [--restore <paths> --from <ref>]` · `fail-first.sh --remove <path>` | **One command proves a ticket's new test fails on the old code (task 319, `--cmd` in tasks 395/416).** Run from the ticket worktree: it copies the worktree's tracked files to a temp folder, puts the named paths back as `<ref>` had them (a path `<ref>` did not have is removed), and runs the suite once on the tip and once in the copy — `--env` does the second run with a seam set instead. `--cmd` runs a command instead of a bash file, from the worktree root as `bash -c '<command>'` — a Go package, a `make check` — and composes with `--restore`/`--from` and `--env` exactly as `--suite` does, so a lander can put back only the one file the ticket's **first** test file needs (later test files reference code the old ref does not have) or ask for a `--copy` and run the command by hand; anything the copy must generate first (`go generate`, `make generate`) goes in the command, since the script has no per-project setup step. Each run prints its exit code and its `^ok`/`^FAIL`/`--- FAIL:` counts (override with `--count-regex`) plus the first FAIL lines, and the row a land records gets one `result:` line. Only assertion failures count: a copy that exits non-zero because it does not **compile** (a `[build failed]` or `[setup failed]` line, Go's bare trailing `FAIL`) is NOT PROVED and the verdict says "failed to build". Exit `0` only when the tip passed and the second run failed; `1` when it proved nothing (the tip failed, both runs passed, or the second failed without a failure line); `2` a refusal that ran nothing — no restored path differed from the tip, the suite file is missing, `<ref>` does not resolve, `mktemp` failed, or a second run alone was asked for. The copy is a git repository (the suites read the repo they sit in) and one function makes and removes it, refusing an empty path. `--copy` makes that guarded copy, prints it and leaves it for a review lens; `--remove` takes it away and refuses a path it did not make. `ticket.sh land --fail-first` runs it. Tests: `tests/fail-first.test.sh`. |
+| `orchestrator-count.sh [--quiet]` | The only scheduled counter (every 30 minutes since task 360 — see below): counts unfiled done-tasks, overdue dispatch records, stale PRs, (task 079) any loaded `com.navigate*`/`com.navigateops.*` launchd job sitting at a non-zero, non-`-` exit status, and (task 360) any worker that finished cleanly and whose ticket nobody landed. Own exit codes: `0` nothing crossed, `2` something crossed AND every escalation of it landed in `PENDING/`, `1` a crossing's escalation FAILED to land (or the script couldn't establish its own bearings), `64` bad usage — `2` is reserved for "found something and told someone", never conflated with a real failure. Run under `run-job.sh`, which maps that `2` to a clean launchd status; see its header for the full contract. |
+| `<report-lines> \| escalate-crossing.sh <kind>` | The "tell someone" half of the counter: turns a crossing into one file per finding kind in `workspaces/coo/decisions/PENDING/`, landed on `main` through a throwaway worktree. Re-runs update that file rather than piling up duplicates. Kinds: `unfiled-done-tasks`, `overdue-dispatch-records`, `stale-open-prs`, `failing-launchd-jobs`, `finished-not-landed`, `installed-copies-drifted` (task 369: `install-local.sh --check` found a copy under `~/bin`'s install folder — or `session-start-notice`'s under `~/.claude/hooks` — missing, stale or not executable). Called by `orchestrator-count.sh`, not by hand. |
 | `ask-rawls --ask <task-slug>:<blocker-slug> "<question>" [--live]` | Dispatcher → Rawls. One fresh Fable call per ask on the Claude plan, capped at $6 per call (two calls per key, so $12 per question), fanned out in parallel, reading only a snapshot of `main`'s record. A cited ruling lands in `workspaces/rawls/ANSWERS.md` on `main`; an uncited question comes back as residue (`--live`) or goes to `PENDING/`. Two calls per issue key, then a human. **Refuses executors** (Pi sessions, bridge chains) and is deliberately **not** linked into `~/bin`. Procedure: `.claude/skills/dispatcher-blocked/`. |
 | `check-task-filed.sh [--range <git-range>] [--count]` | Pre-merge gate — fails if a `tasks/inbox/*.md` file is `status: done` but hasn't been moved to `tasks/done/`. `--count` prints a bare count (then offending paths) for `orchestrator-count.sh` to consume, instead of parsing prose. |
 | `frontier-ready.sh [--branch <ref>] [--series <spec>]` | The frontier's ready list: prints the tasks the orchestrator may dispatch, one `NNN-slug` per line, most-direct-dependents first. A task is ready when it is in `tasks/inbox/`, its `status: queued`, every `blocked-by` (inline or block-style) names a `done` task, and its `_planning/<series>-YYYY-MM-DD.md` spec has an `## Approved` line carrying a signed `YYYY-MM-DD` date (a template placeholder, HTML comment, or fenced block never counts). `--branch` reads a named ref without checking it out; `--series` limits to one spec (zero or several matching files is an error). Exit codes follow `orchestrator-count.sh`: `0` clean list, `2` graph error found and reported (cycle, dangling or bare-number `blocked-by`, ambiguous spec, one task stem in both `tasks/inbox/` and `tasks/done/`), `1` could not read (including a ref with no `tasks/inbox`), `64` bad usage. |
 | `health-check.sh [--update-baseline]` | The weekly health check (task 079), rebuilt model-free: deno lint/check/test over `supabase/functions`, Supabase advisors diffed against a committed baseline (`health-baseline.txt`), and a pipeline snapshot (shipment legs, alerts, unacked notifications, the two tracking cron jobs). Writes a dated report to `HEALTH_REPORT_DIR` (default `~/Library/Logs/navigate-ops/health/`, never committed). Own exit codes: `0` clean/watch, `2` a real RED AND the PENDING escalation landed, `1` a check could not run at all OR a RED's PENDING write failed (could-not-report is the same bucket as could-not-run — that distinction is the whole point of task 079), `64` bad usage. A RED lands one `workspaces/coo/decisions/PENDING/health-check.md`, same dedupe shape as the counter's crossings. Run under `run-job.sh`, which maps `2` to a clean launchd status. |
-| `launchd/run-job.sh <repo-relative-script> [args...]` | What every `com.navigate*` launchd job actually invokes (task 036). Refreshes the dedicated jobs checkout (`~/Sites/navigate-ops-jobs`, gitignored from this repo, a `git worktree` detached at `origin/main`) to `origin/main`, refuses to run against it if it's missing or dirty, then runs the named script relative to it (not `exec` — it stays alive to translate the exit code). **The exit-code contract**, so `launchctl list`'s status column can't conflate "found something and reported it" with a crash: target exit `0` → `0`; target exit `2` (ran, found something, reported it successfully) → `0`, logged as `findings reported (rc 2)`; anything else (could not run, or ran but could not report) → passed through unchanged, which is what `failing-launchd-jobs` (arm 5 of `orchestrator-count.sh`) watches for. Never run by hand outside a test — see `launchd/INSTALL.md`. |
+| `launchd/run-job.sh <repo-relative-script> [args...]` | What every `com.navigate*` launchd job actually invokes (task 036). Refreshes the dedicated jobs checkout (`~/Sites/navigate-ops-jobs`, gitignored from this repo, a `git worktree` detached at `origin/main`) to the ref `NAVOPS_JOBS_REF` names — `origin/main` unless a plist sets it, which is how a job runs a branch that is not main yet (task 360) — refuses to run against it if it's missing or dirty, then runs the named script relative to it (not `exec` — it stays alive to translate the exit code). **The exit-code contract**, so `launchctl list`'s status column can't conflate "found something and reported it" with a crash: target exit `0` → `0`; target exit `2` (ran, found something, reported it successfully) → `0`, logged as `findings reported (rc 2)`; anything else (could not run, or ran but could not report) → passed through unchanged, which is what `failing-launchd-jobs` (arm 5 of `orchestrator-count.sh`) watches for. Never run by hand outside a test — see `launchd/INSTALL.md`. |
+| `install-local.sh [--install] [--check] [--into <dir>] [--bin <dir>]` | **Puts the commands that run outside any checkout, and checks them against this one (task 369, closing S11 of the build-3 follow-ups and task 286's `~/bin/lib` prop).** `--install` copies `lane`, `ask-pi`, `ask-claude` and the four `lib/*.sh` `lane` sources into one folder outside any checkout (`~/.local/share/navigate-ops-bridge` by default — refused, exit 64, if the target is inside a git checkout), symlinks `~/bin/lane`, `~/bin/ask-pi` and `~/bin/ask-claude` at the copies, removes a hand-made `~/bin/lib` link (the copies carry `lib/` beside them), and prints every path it wrote. `--check` exits 1 naming each copy that is **missing**, **stale** (differs from this checkout), **not executable**, or linked somewhere else — and each difference in `session-start-notice`'s installed copy, which `--install` does not own: it delegates to that script's own `--check` so its path has one rule. `orchestrator-count.sh` runs `--check` every 30 minutes and reports drift as an `installed-copies-drifted` crossing, which is the only thing that notices a stuck refresh, a folder that switched branch, or a hand edit. Install from a checkout of `main`. `BRIDGE_INSTALL_DIR` / `BRIDGE_BIN_DIR` override both paths (tests point them at temp dirs; the real `~/bin` is never touched by a suite). Tests: `tests/install-local.test.sh`. |
 | `tests/run-all.sh [suite ...]` | **The one command that runs the bridge's own tests.** Finds every `*.test.sh` beside it by glob (a new suite needs no edit here), runs them one at a time, prints one line per suite — `ok`/`FAIL`, name, seconds, last non-blank line — then a total. Exit codes match the other gates: `0` all passed, `1` could not run (bad `RUN_ALL_DIR`, no suites, `mktemp`), `2` one or more failed or timed out, `64` bad usage. `RUN_ALL_TIMEOUT` (default 300) kills a suite that overruns by its own pid; a failed suite's output is kept and its path printed on stderr (`RUN_ALL_LOG_DIR`, default `$TMPDIR`). `tests/run-all.sh lane dispatch` runs only those two. Tests: `tests/run-all.test.sh` (fake suites through the `RUN_ALL_DIR` seam). |
 
 `dispatch.sh`, `ticket.sh`, `fail-first.sh`, `orchestrator-count.sh`, `escalate-crossing.sh`,
 `check-task-filed.sh`, and `frontier-ready.sh` carry a `.sh` extension and are invoked by path, unlike `ask-pi` / `ask-claude` / `lane`
-above, which are extensionless commands symlinked into `~/bin` (`sync` is extensionless too but is run by its
+above, which are extensionless commands installed into a folder outside any checkout and
+linked from `~/bin` (`sync` is extensionless too but is run by its
 repo path, not linked). `lane-guard` and `session-start-notice` are extensionless like those,
 but are **not** symlinked into `~/bin` either: they are Claude Code hooks, invoked by path from
 `.claude/settings.json` (`"$CLAUDE_PROJECT_DIR"/tools/agent-bridge/lane-guard pre`,
@@ -83,9 +93,20 @@ location). `lib/lane-core.sh` is the one `lane` and `lane-guard` both source, so
 (task 341) is the one "is this dispatch in flight?" predicate — `record_field`,
 `record_in_flight` and `close_lost_record` — read by `dispatch.sh`'s two ADR 0086 gates,
 by `ticket.sh start`'s ceiling check and by `ticket.sh workers`, so none of them can count
-different sets. `lib/land-on-main.sh` is the one write path to `main`'s tree — the
+different sets. `orchestrator-count.sh` sources it too (task 360) and reads every record
+through `record_field`, so "finished" means one thing in the gate and in the watcher.
+`lib/land-on-main.sh` is the one write path to `main`'s tree — the
 throwaway-worktree drain `escalate-crossing.sh` and `ask-rawls` both use, so it
-exists once. `lib/pending-writer.sh` (task 121) is the one PENDING-file writer (`write_one` +
+exists once. `drain/` (task 357) holds the daily drain's four helpers, their `lib.sh`, and two thin
+executables over it — `act.sh` and `waits-on-brendan.sh` — because the procedure
+is a Claude session whose Bash calls, and whose sub-agents, share no shell state. `lib/gh-rest.sh`
+answers `repos/<owner>/<repo>` from the git remote: every GitHub call the drain path makes is
+`gh api` (REST), because the cloud routine it runs in has no GraphQL and every subcommand is a
+403 there. `lib.sh` holds
+the one mode switch (`DRY_RUN` unless `DAILY_DRAIN_LIVE=1`), `act`, and `waits_on_brendan`.
+**None of them mutates anything by default**; the procedure that calls them is
+`workspaces/coo/daily-drain.md`, and `tests/daily-drain.test.sh` drives them against a stubbed
+`gh` that speaks only REST and applies `--jq` with real `jq` to the API's real JSON shapes. `lib/pending-writer.sh` (task 121) is the one PENDING-file writer (`write_one` +
 `pending_frontmatter`: one open file per kind, a re-run keeps `created:` and bumps `last-seen:`),
 shared by `escalate-crossing.sh` and `health-check.sh` so their dedupe rule cannot drift apart.
 None of them are meant to be run directly. Tests for `ask-rawls`
@@ -162,6 +183,11 @@ overwriting the first, because two dispatches used to share a filename and
 same-second names do not order reliably between themselves (glob and `sort`
 collate `_` against `.` by locale), so the readers that need the newer one —
 `send_back_reason` and `status`'s worker reply — compare the record's `started`.
+That timestamp is read from the clock unless **`DISPATCH_TS`** is set: a
+**test-only** seam, which `tests/dispatch.test.sh` pins so its same-second case
+cannot race a loaded machine (the case used to pre-create now−1..now+3 s and went
+red when dispatch.sh reached the clock more than 3 s late). Unset — every real
+run — it is exactly `date -u`.
 
 A dispatch record normally closes even when its worker dies, and
 `orchestrator-count.sh` skips closed records — so **a non-zero `exit_code` on a
@@ -183,6 +209,203 @@ touched by the scan, and neither is a pid-less one: nothing proves that worker g
 
 Covered by `tests/dispatch.test.sh` (stubbed `ask-pi`, real git worktrees, no Pi
 call).
+
+## The Pi worker guard — `pi-guard/` (task 365)
+
+Three of `tasks/README.md`'s Worker rules were broken in build 3 by workers that
+nothing stopped: 322 force-pushed, 311 and 314 ran `pkill -f` (314's own mutation
+run may have died to it), and 320 changed directory to the shared checkout and ran
+`land --dry-run`, stopped only by the in-flight gate. This is the guard that
+refuses those calls **before they run**.
+
+| Refused | Rule it prints | Allowed instead |
+|---|---|---|
+| `git push` with `--force`, `-f`, `--force-with-lease`, or a `+refspec` (also through `git -C … push`) | `tasks/README.md` §The guards — "never force-push" | plain `git push`; report a non-fast-forward rejection |
+| `pkill`, `killall`, and `kill` of a pid this command did not start | §Worker rules — "Kill only a process you started, by pid, never by pattern" | `long-job & pid=$!; … ; kill "$pid"` (`kill -0` is allowed: it signals nothing) |
+| any command whose shell cwd, `cd`/`pushd` target, or `git -C`/`--git-dir`/`--work-tree` path resolves outside the dispatch's worktree | §Conventions — "One agent writes the checkout at a time. Parallel work = git worktrees" | work in the shell's own worktree; ask the other tree's owner |
+
+**Always allowed**: anything under `/tmp`, `/private/tmp`, `/var/folders` and
+`/private/var/folders`. `$TMPDIR` on macOS, `mktemp`, and the bridge's own suites
+all live there, a worker writes its logs and fixture trees there, and nothing under
+them is another lane's checkout. Those roots are checked **before** the worktree,
+so a worker whose *own* worktree is under one of them (a `fail-first.sh` copy, a
+suite's fixture repo) keeps its scratch access; lanes create their worktrees under
+`~/Sites`, so another lane's checkout is never inside one of these roots.
+
+**The hook.** Pi's `tool_call` event — documented in Pi's `docs/extensions.md`
+("`tool_call` can mutate input or block execution") and typed in
+`dist/core/extensions/types.d.ts` as `ToolCallEvent` / `ToolCallEventResult`: a
+handler returns `{ block: true, reason }` and Pi fails the call, with `reason`
+reaching the model as the tool result. It guards every tool whose input carries a
+`command` string — the built-in `bash` and `powershell` **and** hypa's
+`hypa_shell` — because hypa can be in `replace` mode, where a session has no
+`bash` tool at all and a `bash`-only guard would be inert. The two extensions'
+`tool_call` order is not pinned, and it does not need to be: hypa *wraps* a
+command rather than rewriting its words, so the text the guard reads still carries
+the `git push --force` / `pkill` / `cd …` it is looking for.
+
+**Active only for a dispatch.** `dispatch.sh` exports `NAVOPS_PI_WORKER=1` and
+`NAVOPS_PI_WORKTREE=<that dispatch's worktree>` just before it launches `ask-pi`;
+the guard returns immediately unless `NAVOPS_PI_WORKER` is `1`. Brendan's own Pi
+sessions, and every `ask-pi` call he makes by hand, are untouched. If the marker
+is `1` but `NAVOPS_PI_WORKTREE` is missing or not absolute, the guard refuses
+every shell call and says so — a misconfigured guard that silently allows
+everything is the failure mode worth being loud about.
+
+**An unguarded dispatch is named, not silent.** `dispatch.sh` runs
+`pi-guard/install.sh --check` before it writes the record: a missing or stale
+guard prints one warning naming the install command, and the record carries
+`"guard": "missing"` (or `"installed"`) beside `model`. It **warns** rather than
+refuses, because before the orchestrator installs it every dispatch on the machine
+would otherwise be refused — the alternative was a guard that is absent while the
+task file says the calls are refused.
+
+**Install it from a checkout that has the change** (the orchestrator does this
+after the land; every Pi session on the Mac loads that folder, which is why it is
+not installed by the ticket that writes it):
+
+```bash
+tools/agent-bridge/pi-guard/install.sh --install   # copy into ~/.pi/agent/extensions/navops-pi-guard/
+tools/agent-bridge/pi-guard/install.sh --check     # 1 + names it when missing, stale, or the folder has strays
+```
+
+`PI_GUARD_DIR` replaces `~/.pi/agent/extensions` (tests). It is a separate
+installer from `install-local.sh` on purpose: that one owns the commands that run
+transitively outside any checkout, this one owns a folder Pi loads by itself.
+
+**Tests**: `tests/pi-guard.test.sh` (the cases are in `pi-guard/index.test.js`,
+`node:test`, no framework) feeds command strings and a fake worktree to the
+exported checker and asserts every refusal and an allowed neighbour of each — plus
+the installer's `--check`/`--install`. The extension was also run end to end for
+this ticket: `pi -e tools/agent-bridge/pi-guard -p '<ask for it>' --tools bash`
+with the marker set refused the calls, and the same session without the marker ran
+them (see task 365's Result).
+
+**What it does not see** (string-matching a shell command has limits, and these
+are the honest ones):
+
+- a command built at run time — `eval "$CMD"`, a variable holding the forbidden
+  flags, `$(printf '%s' git) push --force`, a python or node one-liner that calls
+  `process.kill`/`os.kill`/`subprocess` — the guard reads the call Pi is given;
+- `sh -c`/`bash -c`/`zsh -c` bodies: a **literal** body is unwrapped and checked
+  as a command of its own (three levels deep, so `bash -c 'git push --force'`
+  and `zsh -lc 'cd /'` are refused), but a body that arrives as a variable —
+  `bash -c "$X"` — is just the text `"$X"` to the guard; a wrapper taking its
+  own flags (`sudo -n kill 1`, `time -p git push -f`) hides the command behind
+  that flag;
+- a target it cannot resolve: `cd "$SOME_ENV_VAR"` is allowed (only variables
+  assigned in the same command are substituted), `popd` is not inspected (it stops
+  the cd tracking below instead, which is the conservative reading), and a path
+  that does not exist is judged by its parent;
+- a command's own `cd`s move the directory **later** targets resolve against only
+  in a plain `&&` chain of simple commands (task 497) —
+  `cd tools/agent-bridge && ./tests/x.sh && cd ..` is allowed, `cd tools && cd ../..`
+  is still refused. Tracking is **off**, and every target is judged from the shell's
+  start directory as before, when the command contains a pipe, a background `&`, a
+  subshell, `$( … )`, backticks, a heredoc `<<` or a `#` comment **or** `;`, a
+  newline, `||`, `pushd`, `popd`, a physical `cd` (`-P`, `set -P`) **or** a `cd` whose target
+  it cannot resolve (`$VAR` it does not know, a backtick, `~user`): those can skip, undo or
+  move a cd past where the tracker can follow, and a tracked cd the shell did not run is a
+  hole, not a false refusal (round-1 review of task 497 found `true || cd tools; cd ..` and
+  `pushd tools && popd && cd ..` walking out; round 2 found `cd tools && cd "$OLDPWD" && cd ..`
+  and `cd -P a/link && cd ..`). An unresolved target is allowed as before, and from there on
+  later targets are judged from the shell's start directory.
+  `cd` is tracked logically, as the shell's own `cd` is. `git -C`/`--git-dir`/
+  `--work-tree` paths are always judged from the start directory;
+- a **heredoc body is read as commands, not as data** — that is deliberate (task
+  497 removed 493's heredoc parser, because every fix for it opened another
+  bypass). `cat > notes.md <<EOF` with `kill 123` in the example text is refused.
+  Write files with the edit tool; there is nothing a heredoc does here that the
+  edit tool does not do better;
+- `git -c alias.x='!…'` and `git config`-defined aliases are not followed;
+- a second command in the same call after `| xargs kill` — `xargs`' targets come
+  from stdin.
+
+It is a guard rail for a well-behaved model, not a sandbox: a worker that wants to
+evade it can. What it does buy is that the accidental `pkill -f` and the careless
+`--force` now cost a refusal that names the rule, in the session's transcript.
+
+## When a worker finishes and nobody lands it (task 360)
+
+A clean exit is not the end of a ticket — the work still has to be landed, and in
+build 3 that last step is where four days went: the orchestrator's session died
+often enough that a worker which finished in 28 h sat unread until Brendan typed
+"Continue". The counter's sixth arm now says so out loud.
+
+**The crossing.** A record in `.claude/dispatch/` with `finished` set and
+`exit_code` 0, finished more than `FINISHED_NOT_LANDED_MIN` (default **30**)
+minutes ago, whose **worktree is still on disk** (there is work sitting
+somewhere), whose ticket has no row in `lands.tsv`, and whose lane has had no
+later dispatch. The last two are the two quiet endings — `ticket.sh land` writes
+the row, `ticket.sh redispatch` writes a later record — so a landed or sent-back
+ticket stops crossing on its own. The worktree test is what keeps the machine's
+months of old records out of it: almost all of them describe tickets that landed
+before `lands.tsv` existed to record it, and without it the first run would
+banner four times an hour about work landed last month. It is a positive answer
+("nothing is sitting there"), not a guard that could not check.
+
+**The notification is a Mac banner and one session line — no email** (Brendan,
+2026-10-24: "not a viable solution for alerting a finished worker"). The banner
+is one `osascript -e 'display notification …'` per record, on the first run that
+sees it, naming the ticket, when it finished and `ticket.sh land`; it stays in
+Notification Center until he is back. A banner that cannot be shown (no
+`osascript`, or it exits non-zero) is logged to the launchd error log and **does
+not fail the run** — the session line is the one that must not be lost, so the
+record is not marked shown and the next run tries again. `osascript` is the last
+step of this path and starts no model (ADR 0085).
+
+**The session line** is `session-start-notice`'s second job (see its row above):
+while a crossing is open it adds one sentence to the message the hook already
+prints, in any folder of the repository. There is no way for a script to push
+text into a running Claude Code session — no documented API, no hook that fires
+on a schedule — which is why the line waits for the next session instead of
+interrupting one. Both marks live in one machine-local file **beside the PENDING
+file** (`workspaces/coo/decisions/PENDING/.finished-not-landed`, one tab-separated
+line per open crossing, with whether its banner was shown): the counter rewrites
+it each run and removes it once nothing is open, which is what makes the session
+line stop. It is never committed — the escalation `.md` next to it is the record
+that goes to main.
+
+**Within the hour** comes from the plist: `com.navigateops.orchestrator-count`
+fires every 30 minutes (`StartCalendarInterval`, 48 fire times — `StartInterval`
+skips fires that land while the Mac sleeps, which is the case that matters here)
+and `tests/orchestrator-count.test.sh` pins all 48. A fire time missed because
+the Mac was asleep runs once on wake. **The push rate is the cost of that
+cadence**, and it is bounded on purpose: every run that changes a PENDING body is
+a commit `escalate-crossing.sh` pushes to `main`, so nothing that crosses may
+print a figure that moves between runs. Three things make that hold:
+
+- `escalate-crossing.sh`'s `last-seen:` is a **date**, not a timestamp, so a
+  steady crossing stages nothing within a day (task 360's round-3 review).
+- **Every arm's line is stable within a day** (task 360's round-5 review, F1,
+  which closed the last two). This arm prints no seconds-age; arm 2 prints
+  `output_log_date=<YYYY-MM-DD>` instead of the log's mtime to the second — the
+  date still answers "did this worker stop writing days ago, or is it still
+  going" and `deadline` sits beside it for "how overdue"; arm 5 prints the job's
+  label and last exit status and **no pid**, because a crash-looping `KeepAlive`
+  job comes back with a new pid every few seconds (`launchctl list` has it when
+  you go to act). Earlier, at two runs a day, a per-run stamp or pid was two
+  pushes; at 48 it was 48.
+- `tests/orchestrator-count.test.sh` pins it per arm: two runs where only the
+  log's mtime (arm 2), the job's pid (arm 5) or nothing at all (arm 6) changed
+  produce a byte-identical PENDING file.
+
+**Closing a crossing that will never land.** The arms are read, not guessed, so
+an ordinary crossing closes itself: `ticket.sh land` writes the lands.tsv row,
+`ticket.sh redispatch` writes a later record, and the state file goes on the next
+run. A record that describes work no lander will ever touch — a dispatch outside
+`ticket.sh` (`lane new`, or `--force-shared-checkout` against the shared
+checkout, whose worktree never goes away) — has no such ending, and would cross
+until someone acts. There are two honest answers, both one command: delete the
+record (`.claude/dispatch/<lane>-<ts>.json`), or remove the worktree it names
+(`lane prune`); either makes the next run drop it. Deleting the record is the
+right one when the work is finished and was never meant to land.
+
+Covered by `tests/orchestrator-count.test.sh` (a stubbed `osascript` on `PATH` —
+no real banner ever fires from a test run — a stubbed `launchctl`, `PENDING_DIR`
+as the queue seam, and the plist's slot check) and
+`tests/session-start-notice.test.sh` (the line open and closed, in a worktree and
+in the main checkout).
 
 ### Waiting, the brief file, and the preflight
 
@@ -276,11 +499,12 @@ checkout and the same lane registry `lane` writes, so nothing is pasted between 
 
 ```bash
 tools/agent-bridge/ticket.sh start --series <s> --task <NNN-slug> \
-    --owns <paths> --eta <minutes> --brief <file> [--wait] [--force] [--force-battery]
+    --owns <paths> --eta <minutes> --brief <file> [--wait] [--force] \
+    [--force-battery] [--force-load]
 tools/agent-bridge/ticket.sh redispatch --series <s> --task <NNN-slug> --eta <minutes> \
-    --brief <file> [--wait] [--force] [--force-battery]
+    --brief <file> [--wait] [--force] [--force-battery] [--force-load]
 tools/agent-bridge/ticket.sh land <pr> --reviewed <sha> [--read-unreviewed] [--dry-run] \
-    --fail-first <suite> [args…]
+    --fail-first <suite|--cmd <command>> [args…]
 tools/agent-bridge/ticket.sh status <NNN-slug | lane>
 tools/agent-bridge/ticket.sh workers
 ```
@@ -294,11 +518,21 @@ pid**. Without `--wait` it returns once the worker is launched; with `--wait` it
 flag through and exits with the worker's code. `--eta` digits are **decimal**: `08` is 8
 minutes, never octal (a bare `$(( ))` aborts on `08` and reads `010` as 8).
 
+**The owned paths also take each `--owns` source's generated outputs** (task 426), from the
+one source → generated-output table beside `land`'s step-1 stays-in-lane check, so a land is
+never refused for a file the ticket's own build regenerated (ticket 407's `app.css`, which
+`make check` writes). The rows: any `*.templ` under `apps/navops/` → that view's sibling
+`*_templ.go`; any `*.templ` under `apps/navops/internal/web/` →
+`apps/navops/internal/web/assets/app.css`. An owned **directory** brings the outputs of the
+views under it, so `--owns apps/navops/internal/web/views` gets app.css too; an output an
+owned path already covers is not added, and a lane with no view source adds nothing and
+prints nothing. `start` prints one `generated <path>` line per output it added.
+
 **`--force` passes `dispatch.sh --force`** and nothing else: it is the ceiling's bypass, so a
 forced start skips the advisory ceiling check above and lets `dispatch.sh`'s own gate warn and
-proceed. `--force-battery` stays the battery's — separate flags for the same reason `--force`
-and `--force-shared-checkout` are separate: one is a calibration guess, the other a data-loss
-risk.
+proceed. `--force-battery` stays the battery's and `--force-load` the load's — separate flags
+for the same reason `--force` and `--force-shared-checkout` are separate: one is a
+calibration guess, the other a data-loss risk (task 361).
 
 **Every failed start rolls back what it made.** After the branch is cut, any exit — a `lane
 new` refusal (even one that already added the worktree), an unreadable worktree path, a
@@ -331,13 +565,22 @@ them when `dispatch.sh` refused:
   (ADR 0086), so another session's worker holds it too. The refusal lists each dispatch in
   flight — lane, task, started, deadline — and makes nothing.
 - **The battery.** Every run prints one power line: the source, the battery percentage and
-  whether the lid is closed (`ticket.sh start: power — AC power, battery at 100%, lid open`).
-  On battery below **7%** it refuses (Brendan, 2026-10-12) unless `--force-battery` is given,
-  which says loudly that it bypassed the floor. A closed lid is **reported, never refused on**
-  and never a reason to suggest a power setting: it is Brendan's deliberate pause
-  (2026-10-11). An unknown source or percentage cannot prove a shortfall, so it does not
-  refuse. The reading sits behind `TICKET_POWER_CMD` (a command printing
-  `source:`/`percent:`/`lid:` lines) so the tests never read the real machine.
+  whether the lid is closed (`ticket.sh start: power — AC power, battery at 100%, lid open`;
+  `redispatch`'s line says `redispatch`, not `start`). **Any battery refuses** — at any
+  percentage — unless `--force-battery` is given, which says loudly that it bypassed the
+  check (task 361: build 3's 312 started at 9% and 332 died at 11%). A closed lid is
+  **reported, never refused on** and never a reason to suggest a power setting: it is
+  Brendan's deliberate pause (2026-10-11). An AC source never refuses; an unknown percentage
+  on battery still does, because the source alone proves it. The reading sits behind
+  `TICKET_POWER_CMD` (a command printing `source:`/`percent:`/`lid:` lines) so the tests never
+  read the real machine.
+- **The load.** The 5-minute load average (the second number of `sysctl -n vm.loadavg`) is
+  compared against `START_MAX_LOAD` (default **100**): at or above it, start and redispatch
+  refuse, printing the load and the top three processes by CPU
+  (`ps -Ao pcpu,comm -r`) — the runaway `airportd` shape that turned build 3's 2-hour estimate
+  into an 11-hour run at load 112–226. `--force-load` bypasses it loudly. A reading that is
+  empty or not a number cannot prove overload, so it never refuses. The reading sits behind
+  `TICKET_LOAD_AVG` (a number) so the tests never read the real machine's load.
 
 **The brief it sends is the caller's file plus one line**: "Follow `tasks/README.md` §Review
 before the PR and §Worker rules." — appended once (skipped if the file already carries it), on
@@ -351,19 +594,23 @@ command. It takes `start`'s `--series`, `--task`, `--eta`, `--brief`, `--wait`, 
 new brief on the lane and worktree the ticket already has, printing the same lane, branch,
 worktree, record and pid lines. It refuses when no lane matches, its worktree is gone, or a
 dispatch for the lane is still in flight (two workers on one tree), and it applies the same
-battery floor. It rolls nothing back — it made nothing, so a refusal leaves the lane and
+battery and load checks as `start` (its power line says `redispatch`). It rolls nothing back — it made nothing, so a refusal leaves the lane and
 worktree exactly as they were. The ceiling is `dispatch.sh`'s own gate, which `--force`
 reaches there; `redispatch` never re-cuts the branch.
 
 `land` runs the five mechanical steps of `tasks/README.md` §The lander check in order and
 stops at the first that fails, naming it: (1) the ticket worktree is at the PR's head and every
-path in `git diff <base>...<head>` is under the lane's owned paths; (2) the suites the ticket
-names pass on the ticket worktree — a `tests:` frontmatter line on the queued copy of the task
-file (on `build/<series>`) names them (`tests: [<path>, <path>]`, paths from the worktree root,
-none outside it), and a ticket that names none gets `tools/agent-bridge/tests/run-all.sh`, so a
-ticket in another room no longer lands on the bridge's suites; a `tests:` line added in the
-ticket branch is ignored, so a worker cannot swap the gate; they run under `caffeinate -i` where it exists, holding the Mac awake the way
-`dispatch.sh --wait` does (task 343); (3) the PR body's
+path in `git diff <base>...<head>` is under the lane's owned paths; (2) the suites and commands
+the ticket names pass on the ticket worktree — a `tests:` frontmatter line on the queued copy
+of the task file (on `build/<series>`) names the suites (`tests: [<path>, <path>]`, paths from
+the worktree root, none outside it) and a `test-commands:` block there names the rest, one
+command per line, each run from the worktree root as `bash -c '<command>'` with its exit code as
+its result — a Go package, a `make check` (task 416); it is a block rather than a `tests:` entry
+because the `tests:` reader splits on commas and spaces, which a command is full of. A ticket
+that names neither gets `tools/agent-bridge/tests/run-all.sh`, so a ticket in another room no
+longer lands on the bridge's suites; a line or block added in the ticket branch is ignored, so a
+worker cannot swap the gate; they run under `caffeinate -i` where it exists, holding the Mac
+awake the way `dispatch.sh --wait` does (task 343); (3) the PR body's
 `## Review` section has one `Round <n>: <GREEN|YELLOW|RED> (<models>) reviewed <sha>` line at
 the start of a line per round, and a **RED anywhere in the last round refuses the land**,
 whatever follows it (Brendan, 2026-10-12, task 343). The last round is everything from the last
@@ -384,13 +631,23 @@ uncommitted files, or a dispatch for the lane is still running. Then it calls `m
 worktree, deletes the ticket branch locally and on origin, and appends one tab-separated row
 to `.claude/dispatch/lands.tsv` under its header row. Once the PR has merged the row is written
 even if a removal step fails, and the failures are named; `merge-pr.sh` prints the PR's state
-after the merge, so a caller never needs a second call to learn that it merged. **A `land` that
+after the merge, so a caller never needs a second call to learn that it merged. **A step-2
+refusal says what the machine was doing** (task 428). Its first line carries the 1- and
+5-minute load averages (`sysctl -n vm.loadavg`, 361's `load_average` reader) and the lines
+below it the top three processes by CPU (361's `top_cpu` printer) — three of the
+quote-page-redesign build's interval-1 land refusals were load or sleep, not the ticket, and
+build 4's leaked load generators made other lands time out, so the reason alone cannot tell
+them apart. A passing step 2 prints no load line. `LAND_MAX_LOAD=<n>` is optional and off
+when unset: with it set, step 2 **refuses to start** when the 1-minute average is above `n`,
+saying so, naming the top three and running no suite. The readings sit behind
+`TICKET_LOAD_AVG`/`TICKET_LOAD_AVG_1` (numbers) so no test reads the real machine's load.
+**A `land` that
 stopped after the merge can be run again** (task 343): a PR gh reports as already merged repeats
 no step, merges nothing and goes straight to the cleanup and the row — a row already holding
 that PR is not appended twice, and a re-run's `fail_first` column reads `not run` rather than
 claiming a proof it did not make. A re-run is recognised by the `land-<pr>.pending` marker the
 first run writes just before it merges (removed once the row is written), so a PR merged some
-other way — a raw `gh pr merge`, the web UI, `merge-pr.sh` on its own — is refused instead of
+other way — a raw merge, the web UI, `merge-pr.sh` on its own — is refused instead of
 being cleaned up and counted as a gated landing. A `git ls-remote` that fails is not read as "the origin branch
 is already gone": the failure is named and the run says so. `--dry-run` prints the unreviewed
 diff, the row it would append **with every column named**, and the mutation steps, without
@@ -409,7 +666,7 @@ headerless file, whose rows keep their eight values and read `-` in every column
 | 5 | `reviewed` | `--reviewed`, resolved to a sha |
 | 6 | `head` | the PR's `headRefOid` |
 | 7 | `worker_seconds` | sum of `finished - started` over the lane's records; time on the wall, so it includes a sleep inside a dispatch unless column 14 is subtracted (the 10 h 51 m against a 75-minute estimate is one). A record closed as lost (`exit_code: -1`) is not a window at all |
-| 8 | `fail_first` | the command `land` ran and both runs' counts (`… --suite <test file> --restore <path> --from <ref> — tip exit=0 ok=12 FAIL=0 \| copy exit=1 ok=3 FAIL=2`), or `manual — <the sentence>` from `--fail-first-manual` (task 319) |
+| 8 | `fail_first` | the command `land` ran and both runs' counts (`… --suite <test file> --restore <path> --from <ref> — tip exit=0 ok=12 FAIL=0 \| copy exit=1 ok=3 FAIL=2`, or `… --cmd 'cd apps/navops && go generate ./internal/pricing/ && go test -count=1 ./internal/pricing/' --restore <path> --from <ref> — tip exit=0 ok=1 FAIL=0 \| copy exit=1 ok=0 FAIL=2`), or `manual — <the sentence>` from `--fail-first-manual` (task 319) |
 | 9 | `dispatches` | how many dispatch records the lane has, one per `start` and per `redispatch` |
 | 10 | `rounds` | how many `Round <n>:` lines the PR's `## Review` has |
 | 11 | `verdicts` | each round's colour, in order, comma-separated (`RED,YELLOW`) |
@@ -578,11 +835,11 @@ claim is removed.
 The check-then-append inside `lane new` is protected by a per-`pr/<n>` `mkdir` lock in the shared
 git dir (the same shape `ask-pi` uses for its thread lock, task 156), so two same-instant claims
 of one PR cannot both pass the refusal. **`merge-pr.sh <pr>` is the way to merge**: it runs
-`lane reviews <pr>` and refuses `gh pr merge --merge` while any claim is open, so no one has to
+`lane reviews <pr>` and refuses to merge while any claim is open, so no one has to
 remember to run the check by hand. A hard-blocking `gh` alias or git hook would close the raw
-`gh pr merge` loophole too, but that needs Brendan's go and is not yet decided.
+merge loophole too, but that needs Brendan's go and is not yet decided.
 
-## One lock for the registry — `lane new`, `lane rm`, `lane prune --apply` (ticket 344)
+## One lock for the registry — `lane new`, `lane rm`, `lane prune --apply`, `lane widen` (tickets 344, 427)
 
 Every command that writes `lanes.tsv` holds **one** lock, `<git-common-dir>/.lane-registry.lock`
 (a `mkdir` lock with its pid published by temp-file + `mv`, the same shape as the per-PR one
@@ -593,15 +850,49 @@ above), across its whole read-modify-write:
 | `lane new` | the duplicate-name re-check → the append, both taken together at the very end of the claim, so the lock is **not** held across `git worktree add` (a second window claiming another name is never refused for that) |
 | `lane rm` | the `grep -q "^<name>\t"` → the `grep -v` + `mv` that replaces the file |
 | `lane prune --apply` | the scan that picks the rows → the `awk` + `mv` rewrite (`lane prune` without `--apply` writes nothing and takes no lock) |
+| `lane widen` | the lookup of the row → the `awk` + `mv` rewrite of its `owns` cell, then the one log line |
 
 Without it, three races could each silently lose a row: two same-instant claims of one name both
-passing the duplicate check, and an append landing between another command's read and its rewrite
-(the rewrite replaces the file with its own snapshot, so the appended row is gone). A contender
+passing the duplicate check, an append landing between another command's read and its rewrite
+(the rewrite replaces the file with its own snapshot, so the appended row is gone), and two
+same-instant widens of one lane each replacing `owns` with its own snapshot (only one of the two
+paths survives). A contender
 **waits** for this lock (bounded, ~5 s) and refuses with **exit 3** only if it stays held — unlike
 a `pr/<n>` lock, which refuses at once because it is held for a whole claim. A lock whose pid names a
 dead process is reclaimed, so a killed `lane` cannot wedge the registry. The lock order is always
-the `pr/<n>` locks first, then the registry, and `lane rm`/`lane prune --apply` take only the
-registry — so the two never deadlock.
+the `pr/<n>` locks first, then the registry, and `lane rm`/`lane prune --apply`/`lane widen` take
+only the registry — so the two never deadlock.
+
+## Widening a lane (`lane widen`) — task 427
+
+A lane's owned paths are set when it is claimed. When the work turns out to need one more path,
+`lane widen` adds it **through the registry, under the lock, with a log line** — the orchestrator
+of build 2's quote-page-redesign widened two lanes by scripting `.git/lanes.tsv` by hand, which is
+what this replaces.
+
+```bash
+lane widen quote-page-redesign-407 apps/navops/internal/web/views   # add one path
+lane widen my-lane a,b,c                                            # add several
+lane widen my-lane shared/out --share                                # onto a LIVE lane's path, deliberately
+```
+
+It prints the lane's new owned paths (`lane 'x' owns: a,b,c`). A path the lane already owns — the
+same path, a trailing slash on it, or a path inside one it owns (`alpha/sub` when it owns `alpha`)
+— is a no-op, said in one line, and logs nothing; so is a widen of a lane whose `owns` cell is
+empty, because an empty cell means **the whole repo** and appending a path would narrow it.
+Only a **live** lane's path refuses (exit 3, naming that lane; `--share` overrides with a
+warning); an overlap with a lane whose liveness cannot be resolved (`unknown`, a Pi lane) or whose
+claimant is `STALE` is printed as a `note:` line and allowed. If the sessions dir itself cannot
+be read, no lane can be resolved, so that is said and every non-Pi overlapping lane blocks
+(`--share` still overrides) rather than being reported as dead. A name or path containing a
+tab, newline or backslash is refused, because the registry is an 8-column TSV.
+
+Each widen that adds something
+appends one line to `<git-common-dir>/lane-widens.log`, beside `lanes.tsv` in the shared git dir
+(never committed): UTC time, caller session (the same session `lane new` records), lane, paths
+added. `lane ls` is unchanged. Concurrency: as with a hand edit, a widen is one registry
+read-modify-write and takes the one registry lock above, so two widens started together both
+apply.
 
 ## Pruning dead lanes (`lane prune`) — task 295
 
@@ -709,28 +1000,48 @@ touched).
 
 ## This directory is the canonical copy
 
-`~/bin/ask-pi`, `~/bin/ask-claude` and `~/bin/lane` are **symlinks into this
-directory**. Editing a file **in the checkout `~/bin` points at** is the edit
-that reaches the command — no copy step; editing it in your own worktree does
-not, until that edit is on the branch that checkout holds (see "What runs is
-not the committed version", below).
-They are **safe to symlink**: every script here that loads a sibling
-file (the `lib/` helpers, `ask-pi`, `review-prompts/`, `scripts/lib/`) resolves
-its own symlinks before it looks for that sibling, and `ask-pi` / `ask-claude`
-load no helpers, so no `lib` link is needed next to the link in `~/bin`.
+`~/bin/ask-pi`, `~/bin/ask-claude` and `~/bin/lane` are **links to copies**, not
+to this directory (task 369, which closes S11 of the build-3 follow-ups). The
+rule since 2026-10-27:
 
-**"Safe to symlink" is about loading siblings, not about which checkout a
-script reads.** A linked script that reads the repo — `check-task-filed.sh`,
+```sh
+tools/agent-bridge/install-local.sh            # copy into ~/.local/share/navigate-ops-bridge, link ~/bin at it
+tools/agent-bridge/install-local.sh --check    # exit 1 naming every stale, missing or mislinked copy
+```
+
+`install-local.sh` copies `lane`, `ask-pi`, `ask-claude` and the four
+`lib/*.sh` `lane` sources into one folder **outside any checkout**
+(`~/.local/share/navigate-ops-bridge` by default) and points `~/bin` at it.
+Install from a checkout of `main`. Editing a file here does not reach the
+command until the installer runs again — which is the point. What used to be
+wrong: `~/bin/lane` was a symlink into the shared `~/Sites/navigate-ops`
+checkout, which sat on `feat/3D-configurator`, so every hand-typed `lane new`
+(which `~/.claude/CLAUDE.md` mandates) ran a `lane` 483 diff lines behind
+`main`, and nothing said so.
+
+**`orchestrator-count.sh` runs `--check` every 30 minutes** and reports drift as
+an `installed-copies-drifted` crossing (a `PENDING/` file, and exit 2 from the
+counter). That is the only thing that notices a refresh nobody ran, a folder
+that switched branch, or a hand edit to a copy. `session-start-notice`'s
+installed copy at `~/.claude/hooks/session-start-notice` (task 326) is part of
+the same `--check`: the installer delegates to that script's own `--check`, so
+its path keeps one rule.
+
+The copies are **safe to link** into `~/bin`: every script here that loads a
+sibling file (the `lib/` helpers, `ask-pi`, `review-prompts/`, `scripts/lib/`)
+resolves its own symlinks before it looks for that sibling, and `ask-pi` /
+`ask-claude` load no helpers. The copies carry `lib/` beside them, so the
+hand-made `~/bin/lib` link is no longer needed and `--install` removes it (the
+link, never its target) — task 286.
+
+**"Safe to link" is about loading siblings, not about which checkout a
+script reads.** A script that reads the repo — `check-task-filed.sh`,
 `ask-rawls`, `room-sweep.sh` — reads the checkout its own file lives in, not
 the caller's; running it through a link anywhere does not make it read your
 worktree.
 
-What runs is **not** "the committed version" — it is the copy in whichever
-checkout `~/bin` points at, on whatever branch that checkout is parked on.
-`~/bin/lane` today points into the shared `~/Sites/navigate-ops` checkout, which
-is not guaranteed to be on `main`; merging a fix here does not change the command
-until that checkout carries it. As of 2026-10-10 the hand-made `~/bin/lib` link
-must stay until then (removing it is task 286).
+What runs is **not** "the committed version" of this directory: it is the
+installed copy, and `--check` is what says whether that copy is this checkout's.
 
 Seven other repos carry a mirror of these scripts so the tooling is recoverable
 if this checkout is lost. Those mirrors are backups, not what executes. After
@@ -804,9 +1115,19 @@ Every scheduled `com.navigate*`/`com.navigateops.*` launchd job runs through
 dedicated `git worktree`, detached at `origin/main`, that nobody works in
 (task 036). It is **not** the shared `~/Sites/navigate-ops` checkout, which is
 disciplined to stay on whatever branch a session last left it on and has no
-guarantee of being on `main` when a job fires. `run-job.sh` refreshes it to
-`origin/main` before every run and refuses outright if it's missing or dirty.
-Setup and verification: `launchd/INSTALL.md`.
+guarantee of being on `main` when a job fires. `run-job.sh` refreshes it to the
+ref `NAVOPS_JOBS_REF` names (`origin/main` unless a plist sets it) before every
+run and refuses outright if it's missing, dirty, or the ref does not resolve. A
+failed **fetch** runs the existing checkout when the ref is the default
+(`origin/main`, "slightly stale beats not firing") and is a **refusal** when
+`NAVOPS_JOBS_REF` is set: offline and "that branch was deleted after its series
+landed" are indistinguishable from there, and the second one would silently
+freeze the job on a dead branch.
+`NAVOPS_JOBS_REF` exists so a job can run a branch that is not `main` yet: build
+4's counter fixes had to fire against `build/bridge-safety` before that series
+landed. Setting it (and `NAVOPS_JOBS_DIR`) is a plist `EnvironmentVariables`
+change, not a code change — `launchd/INSTALL.md` has the block. Setup and
+verification: `launchd/INSTALL.md`.
 
 ## Agent-side guidance
 

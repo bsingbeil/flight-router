@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # sync — push the canonical agent-bridge scripts to every repo that mirrors them.
 #
-# This directory is canonical; ~/bin symlinks here. The mirrors exist so the
-# tooling survives losing this checkout. Run after changing any script, then
+# This directory is canonical. ~/bin links COPIES of three of these files, made by
+# install-local.sh into a folder outside any checkout (task 369) — not this one,
+# so editing here does not change the command until that installer runs. The
+# mirrors exist so the tooling survives losing this checkout. Run after changing any script, then
 # commit AND push the repos this names.
 #
 # A mirror is current when its PUSHED copy matches canonical: each file under

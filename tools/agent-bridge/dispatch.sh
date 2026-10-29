@@ -72,10 +72,26 @@ run that prints no record path refused before launch, so the exit code is
 dispatch.sh's own (2, 3, 4 or 5); exit 6 means the worker's fate is unknown. A
 --wait that gave up at the deadline leaves the worker running: the record is
 still its handle.
+
+env:
+  DISPATCH_EXCLUDE_TOOLS
+                    comma-separated tools the worker starts WITHOUT, handed to
+                    `ask-pi --exclude-tools`. Default readSeek_edit,task_plan
+                    (ticket 375: readSeek_edit lost its anchors 77 times across
+                    14 build-3 tickets; task_plan's gate made workers abandon
+                    their plans). Empty excludes nothing.
+  DISPATCH_TS       test-only: pins the timestamp in the record's filename instead
+                    of reading the clock. Unset (the only value a real run uses)
+                    reads `date -u`. The suite's same-second case sets it so the
+                    collision it asserts does not depend on dispatch.sh reaching
+                    the clock inside the second the test pre-created.
 EOF
 }
 
 lane=""; task=""; series=""; reason=""; eta=30; force=0; force_shared=0; message_file=""; do_wait=0; no_preflight=0; args=()
+# Tools the worker starts without (ticket 375). `-`, not `:-`: an explicitly empty
+# value must exclude nothing, so a caller can turn the denylist off for one call.
+exclude_tools="${DISPATCH_EXCLUDE_TOOLS-readSeek_edit,task_plan}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --lane)   lane="${2:?--lane needs a value}"; shift 2 ;;
@@ -405,7 +421,12 @@ if [ "$pi_in_flight" -ge "$PI_CEILING" ]; then
   fi
 fi
 
-ts="$(date -u +%Y%m%dT%H%M%SZ)"
+# The record's timestamp, through a seam the same-second case below needs: it
+# pre-creates a record for one second and asserts dispatch.sh suffixes the one it
+# writes. Reading the real clock, that case failed whenever a loaded machine
+# pushed dispatch.sh past the second the test had pre-created (~3 s, build 3).
+# Unset, this is exactly `date -u` and nothing else changes.
+ts="${DISPATCH_TS:-$(date -u +%Y%m%dT%H%M%SZ)}"
 stem="${lane}-${ts}"
 # Two dispatches of one lane in the same second share a filename, and the second
 # record used to overwrite the first — a worker that died at once and was sent
@@ -462,6 +483,7 @@ write_record() {
   "worktree": "$(json_escape "$this_tree")",
   "pid": ${pid_json},
   "model": "$(json_escape "$model")",
+  "guard": "$(json_escape "$guard_state")",
   "output_path": "$(json_escape "$log_path")",
   "started": "$(json_escape "$started_iso")",
   "eta_minutes": ${eta},
@@ -496,8 +518,34 @@ JSON
 # a failed-write line, and two independent `>` offsets would overwrite it. The
 # truncate runs before the first record write, so a failure here leaves no
 # open record behind to hold the tree.
+# The worker's shell guard (task 365) is an installed extension, not this
+# script: `install.sh --install` puts it in Pi's extension folder from a landed
+# checkout. Nothing else would notice it missing, so this names an unguarded
+# worker in its own log and in its record instead of letting it run silently —
+# it warns rather than refuses, because until the orchestrator installs it every
+# dispatch on this machine would otherwise be refused.
+guard_state="missing"
+if [ -x "${script_dir}/pi-guard/install.sh" ] && "${script_dir}/pi-guard/install.sh" --check >/dev/null 2>&1; then
+  guard_state="installed"
+else
+  {
+    echo "dispatch.sh: ⚠ the Pi shell guard is NOT installed — this worker's shell calls are unguarded."
+    echo "  Install it from a checkout that carries it: ${script_dir}/pi-guard/install.sh --install"
+    echo "  (it refuses force-push, pkill/killall, and leaving the worktree; task 365)"
+  } >&2
+fi
+
 : > "$log_path"
 write_record "null" "null" "null"
+# The worker's shell guard (task 365) rides on these two variables: Pi's
+# pi-guard extension (tools/agent-bridge/pi-guard/) is inert unless
+# NAVOPS_PI_WORKER=1, and it refuses a shell call outside NAVOPS_PI_WORKTREE
+# when that is set. Exported here, so they reach ask-pi and the `pi` it starts;
+# nothing else about Brendan's own Pi sessions changes. `this_tree` is this
+# dispatch's own worktree (never the shared main checkout).
+NAVOPS_PI_WORKER=1
+NAVOPS_PI_WORKTREE="$this_tree"
+export NAVOPS_PI_WORKER NAVOPS_PI_WORKTREE
 (
   # This subshell's one job after launching the worker is to write the closing
   # record, so it must reach that write after every failing command — not just
@@ -509,7 +557,13 @@ write_record "null" "null" "null"
   # Still uncovered: `set -u` is inherited (an unbound variable aborts), and a
   # signal to this subshell is not trapped. `set +e` covers the 263 path.
   set +e
-  "$ask_pi" -t "$lane" "$message" >> "$log_path" 2>&1 &
+  # The tool denylist rides on ask-pi's own option (ticket 375), never as a bare
+  # trailing argv word: the brief is always the LAST argument ask-pi sees.
+  if [ -n "$exclude_tools" ]; then
+    "$ask_pi" -t "$lane" --exclude-tools "$exclude_tools" "$message" >> "$log_path" 2>&1 &
+  else
+    "$ask_pi" -t "$lane" "$message" >> "$log_path" 2>&1 &
+  fi
   worker_pid=$!
   echo "$worker_pid" > "$pid_file"
   write_record "$worker_pid" "null" "null"

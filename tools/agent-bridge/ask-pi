@@ -21,6 +21,10 @@ options:
       --new           start a fresh thread, discarding prior bridge history
   -m, --model PATTERN override Pi's model (default: pi's own default)
       --raw           print Pi's reply only, no header
+      --exclude-tools LIST
+                      pass a comma-separated tool denylist to pi (pi's own
+                      --exclude-tools). dispatch.sh sets it for workers;
+                      unset means pi's normal tool set, exactly as before.
   -h, --help          this
 
 env:
@@ -28,13 +32,16 @@ env:
 EOF
 }
 
-thread=""; thread_explicit=0; fresh=0; model="${PI_BRIDGE_MODEL:-}"; raw=0; args=()
+thread=""; thread_explicit=0; fresh=0; model="${PI_BRIDGE_MODEL:-}"; raw=0; exclude=""; args=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -t|--thread) thread="$2"; thread_explicit=1; shift 2 ;;
     --new)       fresh=1; shift ;;
     -m|--model)  model="$2"; shift 2 ;;
     --raw)       raw=1; shift ;;
+    --exclude-tools)
+      [ $# -ge 2 ] || { echo "ask-pi: --exclude-tools needs a value" >&2; exit 2; }
+      exclude="$2"; shift 2 ;;
     -h|--help)   usage; exit 0 ;;
     --)          shift; args+=("$@"); break ;;
     *)           args+=("$1"); shift ;;
@@ -127,6 +134,8 @@ cd "$root"
 preamble="${preamble}$(lane_context "$thread")"
 set -- -p --session-id "$session" --approve --append-system-prompt "$preamble"
 [ -n "$model" ] && set -- "$@" --model "$model"
+# One argv word: pi splits the comma list itself.
+[ -n "$exclude" ] && set -- "$@" --exclude-tools "$exclude"
 
 [ "$raw" -eq 1 ] || echo "── ask-pi → ${session} (${root}) ──" >&2
 

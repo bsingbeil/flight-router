@@ -11,6 +11,7 @@
 #   lane new pair --share-worktree   # deliberate two-writer pairing (task 107)
 #   lane review 154       # = lane new review/154 --owns pr/154 (task 109)
 #   lane reviews 154      # pre-merge check: list claims of pr/154 + STATE
+#   lane widen scraper tools/rugby-shop-scraper/out --share   # add owned paths (task 427)
 #   lane ls
 #   lane rm scraper
 #   lane prune [--apply] [--all]   # list lanes nobody holds; --apply drops their rows
@@ -450,24 +451,54 @@ ${r_name}"; fi
   fi
 }
 
-# Warn when a new lane's paths overlap one already claimed. Prefix match both
-# ways, so `vendors` vs `vendors/pricing` is caught.
+# overlap_hits <name> <owns> — one line per overlap between <owns> and another
+# lane's owned path, prefix-matched both ways so `vendors` vs `vendors/pricing`
+# is caught:
+#
+#   <other lane>\t<its path>\t<your path>\t<direction>\t<its claimed_by>\t<its agent>
+#
+# `direction` is `in` when your path is inside theirs, `out` when theirs is
+# inside yours (an equal pair reports both, as the warnings always have), and
+# `whole` — with an empty <its path> — for a lane that claims the WHOLE repo.
+# This is the one overlap predicate: `lane new`'s warnings (check_overlap) and
+# `lane widen`'s refusal both read it, so the two cannot disagree about what
+# overlaps what.
+overlap_hits() {
+  local newname="$1" newowns="$2"
+  local r_name r_agent r_session r_dir r_branch r_owns r_created r_claimed a b
+  [ -n "$newowns" ] || return 0
+  while IFS=$'\t' read -r r_name r_agent r_session r_dir r_branch r_owns r_created r_claimed; do
+    [ -n "$r_name" ] && [ "$r_name" != "$newname" ] || continue
+    if [ -z "$r_owns" ]; then
+      printf '%s\t\t%s\twhole\t%s\t%s\n' "$r_name" "$newowns" "$r_claimed" "$r_agent"
+      continue
+    fi
+    for a in ${newowns//,/ }; do
+      for b in ${r_owns//,/ }; do
+        case "$a/" in "$b/"*) printf '%s\t%s\t%s\tin\t%s\t%s\n' "$r_name" "$b" "$a" "$r_claimed" "$r_agent" ;; esac
+        case "$b/" in "$a/"*) printf '%s\t%s\t%s\tout\t%s\t%s\n' "$r_name" "$b" "$a" "$r_claimed" "$r_agent" ;; esac
+      done
+    done
+  done <<< "$(reg_rows)"
+  return 0
+}
+
+# Warn when a new lane's paths overlap one already claimed (see overlap_hits).
 check_overlap() {
   # NOTE: every variable here is local and r_-prefixed on purpose. `read` in a
   # loop overwrites caller variables of the same name, and blanks them at EOF.
   local newname="$1" newowns="$2" hit=0
-  local r_name r_agent r_session r_dir r_branch r_owns r_created r_claimed a b
+  local rn rb ra rdir rclaimed ragent
   [ -n "$newowns" ] || { reg_rows | grep -q . && echo "  ⚠ this lane claims the WHOLE repo while other lanes exist — expect collisions" >&2; return 0; }
-  while IFS=$'\t' read -r r_name r_agent r_session r_dir r_branch r_owns r_created r_claimed; do
-    [ -n "$r_name" ] && [ "$r_name" != "$newname" ] || continue
-    [ -n "$r_owns" ] || { echo "  ⚠ lane '$r_name' claims the whole repo — it overlaps you" >&2; hit=1; continue; }
-    for a in ${newowns//,/ }; do
-      for b in ${r_owns//,/ }; do
-        case "$a/" in "$b/"*) echo "  ⚠ '$a' is inside lane '$r_name' ($b)" >&2; hit=1 ;; esac
-        case "$b/" in "$a/"*) echo "  ⚠ lane '$r_name' ($b) is inside your '$a'" >&2; hit=1 ;; esac
-      done
-    done
-  done <<< "$(reg_rows)"
+  while IFS=$'\t' read -r rn rb ra rdir rclaimed ragent; do
+    [ -n "$rn" ] || continue
+    hit=1
+    case "$rdir" in
+      whole) echo "  ⚠ lane '$rn' claims the whole repo — it overlaps you" >&2 ;;
+      in)    echo "  ⚠ '$ra' is inside lane '$rn' ($rb)" >&2 ;;
+      *)     echo "  ⚠ lane '$rn' ($rb) is inside your '$ra'" >&2 ;;
+    esac
+  done <<< "$(overlap_hits "$newname" "$newowns")"
   [ "$hit" -eq 0 ] || echo "  → pick disjoint paths, or give one of the lanes its own --worktree" >&2
 }
 
@@ -888,6 +919,178 @@ lane_reviews() {
   return 0
 }
 
+# lane widen <name> <path>[,<path>...] [--share] — add owned paths to an existing
+# lane (task 427), so nobody edits lanes.tsv by hand. One registry-lock
+# read-modify-write, the same lock `lane new`, `lane rm` and `lane prune --apply`
+# take, so two widens started together both land. Refuses a lane the registry
+# does not hold (never claimed, or released by `lane rm`/`lane prune --apply`)
+# and a path another LIVE lane owns — naming that lane — unless --share says the
+# pairing is deliberate. A path the lane already owns is a no-op for that path,
+# said in one line. Every widen that adds something appends one line to
+# <git-common-dir>/lane-widens.log, beside lanes.tsv: UTC time, caller session
+# (the same session `lane new` records), lane, paths added.
+lane_widen() {
+  local name="" paths="" share=0 p
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --share) share=1; shift ;;
+      -*)      die "unknown flag $1" ;;
+      *)       if [ -z "$name" ]; then name="$1"
+               elif [ -z "$paths" ]; then paths="$1"
+               else die "unexpected arg $1"; fi
+               shift ;;
+    esac
+  done
+  [ -n "$name" ] && [ -n "$paths" ] \
+    || die "usage: lane widen <name> <path>[,<path>...] [--share]"
+  # The registry is a tab-separated 8-column file, and `awk -v` also eats
+  # backslash escapes: a tab or newline in a name or path would forge a column or
+  # a whole row. Refuse rather than write it.
+  case "$name" in
+    *\\*|*$'\t'*|*$'\n'*) die "lane widen: a lane name cannot contain a tab, newline or backslash" ;;
+  esac
+  # pr/<n> is a review claim with its own lock and its own one-per-PR rule
+  # (task 109); widening the owns list is not the way to take one.
+  for p in ${paths//,/ }; do
+    case "$p" in
+      *\\*|*$'\t'*|*$'\n'*) die "lane widen: a path cannot contain a tab, newline or backslash" ;;
+      pr/*) die "lane widen does not add a pr/<n> claim — use \`lane review <n>\` (task 109)" ;;
+    esac
+  done
+
+  lane_locks_arm
+  registry_lock
+
+  local row r_agent r_owns r_claimed
+  # NR>1: the header row's first cell is the literal word `name`, so without it a
+  # lane called `name` would find and rewrite the header. ENVIRON, not `-v`: awk
+  # would turn a `\t` in the value into a real tab.
+  row="$(L_N="$name" awk -F'\t' 'NR>1 && $1==ENVIRON["L_N"] { print; exit }' "$REG")"
+  [ -n "$row" ] \
+    || die "no lane named '$name' in the registry — never claimed, or already released (lane ls)"
+  # Tab is IFS *whitespace*, so a bare `read` collapses a row whose owns field is
+  # empty (a whole-repo lane) and shifts every later field left. Swap the
+  # separator for a non-whitespace control character, the way `lane prune` does.
+  IFS=$'\037' read -r _ r_agent _ _ _ r_owns _ r_claimed <<< "$(printf '%s' "$row" | tr '\t' '\037')"
+
+  # An empty owns cell does not mean "owns nothing": the lane claims the WHOLE
+  # repo (overlap_hits reports it as `whole`, `lane prune` reads it the same way).
+  # No path can be added to that without NARROWING it, so every path is a no-op.
+  if [ -z "$r_owns" ]; then
+    echo "no-op: lane '$name' claims the whole repo — nothing to widen"
+    echo "lane '$name' owns: <whole repo>"
+    return 0
+  fi
+
+  local newowns="$r_owns" added="" noop="" covered=0 o
+  for p in ${paths//,/ }; do
+    p="${p%/}"                     # `alpha/` IS `alpha`
+    # Already owned: the exact path, or inside a path the lane already owns
+    # (`alpha/sub` when it owns `alpha`). Adding either only makes noise.
+    covered=0
+    for o in ${newowns//,/ }; do
+      case "$p/" in "$o"/*) covered=1; break ;; esac
+    done
+    if [ "$covered" = 1 ]; then noop="${noop}${noop:+,}${p}"; continue; fi
+    newowns="${newowns}${newowns:+,}${p}"
+    added="${added}${added:+,}${p}"
+  done
+
+  # Only the paths being ADDED are tested: a path the lane already owns must not
+  # make its own widen collide with itself (overlap_hits skips this lane anyway).
+  # A liveness read that FAILS must not switch the refusal off: with an
+  # unreadable sessions dir every Claude lane reads STALE, which would demote a
+  # live lane to a note. Say so, and treat those lanes as live (--share still
+  # overrides) until the dir is readable again.
+  local liveness_unknown=0
+  if [ ! -r "$sessions_dir" ]; then
+    liveness_unknown=1
+    echo "lane: cannot read the sessions dir $sessions_dir — the liveness of overlapping lanes is unknown, so they are treated as live." >&2
+  fi
+  local rn rb ra rdir rclaimed ragent state blocking owners="" blockers="" seen="" key
+  while IFS=$'\t' read -r rn rb ra rdir rclaimed ragent; do
+    [ -n "$rn" ] || continue
+    state="$(claimant_state "$rclaimed" "$ragent")"
+    blocking=0
+    if [ "$state" = live ]; then blocking=1
+    elif [ "$liveness_unknown" = 1 ] && [ "$ragent" != pi ]; then blocking=1
+    fi
+    if [ "$blocking" = 0 ]; then
+      # Only a LIVE lane refuses — that is the rule. But the others must not go
+      # unmentioned: a Pi lane's liveness is not observable (`unknown`) and a
+      # STALE claim may be mid-return, so this is said, not silently allowed.
+      # Once per (lane, path): a second path hitting the same lane is its own line.
+      key="${rn}  ${ra}"
+      if printf '%s\n' "$seen" | grep -qxF -- "$key"; then continue; fi
+      seen="${seen}${seen:+
+}${key}"
+      if [ "$rdir" = whole ]; then
+        echo "lane: note: lane '$rn' ($state) claims the whole repo — adding it anyway." >&2
+      else
+        echo "lane: note: '$ra' also overlaps lane '$rn' ($state) — adding it anyway." >&2
+      fi
+      continue
+    fi
+    # One lane, one sentence: it may own several paths this widen wants.
+    case " ${owners} " in *" $rn "*) continue ;; esac
+    owners="${owners}${owners:+ }${rn}"
+    if [ "$rdir" = whole ]; then
+      blockers="${blockers}  lane '$rn' claims the whole repo
+"
+    elif [ "$state" = live ]; then
+      blockers="${blockers}  '$ra' is owned by live lane '$rn' ($rb)
+"
+    else
+      blockers="${blockers}  '$ra' is owned by lane '$rn' ($rb) — its liveness could not be read
+"
+    fi
+  done <<< "$(overlap_hits "$name" "$added")"
+  if [ -n "$owners" ]; then
+    if [ "$share" = 0 ]; then
+      echo "lane: refusing to widen '$name' — another lane owns a path it wants:" >&2
+      printf '%s' "$blockers" >&2
+      echo "lane: re-run with --share if the two lanes sharing that path is deliberate." >&2
+      exit 3
+    fi
+    echo "lane: WARNING: widening '$name' onto a path live lane(s) ${owners} own — --share said the pairing is deliberate." >&2
+  fi
+
+  for p in ${noop//,/ }; do echo "no-op: lane '$name' already owns '$p'"; done
+  if [ -z "$added" ]; then
+    echo "lane '$name' owns: $r_owns"
+    return 0
+  fi
+
+  # The owns column is field 6 of the 8; rewrite exactly that cell, then replace
+  # the registry by a same-filesystem mv — the lock taken above covers this whole
+  # read-modify-write, the same way `lane rm` and `lane prune --apply` do.
+  local tmp reg_mode
+  tmp="$(mktemp "${REG}.XXXXXX")" || die "could not create a temp registry beside $REG"
+  if ! L_N="$name" L_O="$newowns" awk -F'\t' -v OFS='\t' 'NR>1 && $1==ENVIRON["L_N"] { $6=ENVIRON["L_O"] } { print }' "$REG" > "$tmp"; then
+    rm -f "$tmp"; die "could not rewrite the registry"
+  fi
+  # mktemp creates 0600; keep the registry's own mode across the replace.
+  reg_mode="$(stat -c '%a' "$REG" 2>/dev/null)" || reg_mode=""
+  [ -n "$reg_mode" ] || reg_mode="$(stat -f '%Lp' "$REG" 2>/dev/null)" || reg_mode=""
+  if [ -n "$reg_mode" ]; then
+    chmod "$reg_mode" "$tmp" \
+      || echo "lane: warning: could not set mode $reg_mode on $tmp — $REG may change mode" >&2
+  else
+    echo "lane: warning: could not read the mode of $REG — it may change mode across this widen" >&2
+  fi
+  mv "$tmp" "$REG"
+
+  # One line per widen, beside lanes.tsv in the shared git dir (never committed),
+  # so who widened what and when is answerable after the fact.
+  local who="${CLAUDE_CODE_SESSION_ID:-${PI_SESSION_ID:-}}"
+  printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${who:--}" "$name" "$added" \
+    >> "${REG%/*}/lane-widens.log" 2>/dev/null \
+    || echo "lane: warning: could not append to ${REG%/*}/lane-widens.log" >&2
+
+  echo "widened lane '$name' — added: $added"
+  echo "lane '$name' owns: $newowns"
+}
+
 case "${1-}" in
   new)     shift; lane_new "$@" ;;
   review)  shift; lane_review "$@" ;;
@@ -896,6 +1099,7 @@ case "${1-}" in
   ls|"")   lane_ls ;;
   rm)      shift; lane_rm "$@" ;;
   prune)   shift; lane_prune "$@" ;;
+  widen)   shift; lane_widen "$@" ;;
   -h|--help) lane_usage ;;
-  *)     die "unknown command '${1}' (new | review | reviews | who | ls | rm | prune)" ;;
+  *)     die "unknown command '${1}' (new | review | reviews | who | ls | rm | prune | widen)" ;;
 esac
